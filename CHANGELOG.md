@@ -1,6 +1,6 @@
 # Changelog
 
-## 2026-08-10 — 1.8.0 — Skills, the first message, and ACW: three backend features the skills could not reach
+## 2026-08-10 — 2.0.0 — Skills, the first message, and ACW: three backend features the skills could not reach
 
 The backend shipped three capabilities the plugin had **no** coverage of. A grep proved the gap:
 zero hits for `greetingInstructions` or any agent-skills feature, and exactly two passing mentions of
