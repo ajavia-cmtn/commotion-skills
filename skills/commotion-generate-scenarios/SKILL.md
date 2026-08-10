@@ -8,9 +8,9 @@ description: >-
   whenever the user wants to test, simulate, stress-test, or "make scenarios / personas / a test set"
   for a worker — e.g. "generate test cases for my renewal bot", "make an angry-caller persona and run
   it against the worker". This is step 2 of the quality loop (create-worker → **generate-scenarios** →
-  run-evals → improve-worker). Calls the dev3 backend through the thin Commotion MCP server (OAuth — no
+  run-evals → improve-worker). Calls the Commotion backend through the thin Commotion MCP server (OAuth — no
   API key in the transcript).
-allowed-tools: Read, AskUserQuestion, mcp__commotion__commotion_request, mcp__commotion__commotion_schema, mcp__commotion__commotion_analyzer
+allowed-tools: Read, AskUserQuestion, mcp__commotion-dev3__commotion_request, mcp__commotion-tcuat__commotion_request, mcp__commotion-tcprod__commotion_request, mcp__commotion-dev3__commotion_schema, mcp__commotion-tcuat__commotion_schema, mcp__commotion-tcprod__commotion_schema, mcp__commotion-dev3__commotion_analyzer, mcp__commotion-tcuat__commotion_analyzer, mcp__commotion-tcprod__commotion_analyzer
 ---
 
 # Commotion: Generate Scenarios & Personalities
@@ -39,6 +39,36 @@ create-worker → [generate-scenarios] → run-evals → improve-worker
 Scenarios and personalities created here are the input to `commotion-run-evals` (step 3), which runs
 them as a simulation and reports the pass-rate. The whole loop runs against a specific worker
 **version** — see the version rule below.
+
+## Pick the environment before the first tool call
+
+Commotion runs in several environments — dev3, tcuat, tcprod — and **each one has its own connector
+exposing its own copy of these tools**. They are separate backends holding different data, and one of
+them is **production**. Picking the wrong one is the most damaging mistake available in this skill,
+and nothing downstream will catch it: the guarantee is this instruction, not an enforcement.
+
+**Read the environment off the tool name.** Tools are namespaced by the connector they came from, and
+the environment appears in that name — `dev3`, `tcuat`/`UAT`, `tcprod`/`Prod`. The exact shape depends
+on where you are running: a plugin-declared server name in Claude Code
+(`mcp__commotion-tcuat__commotion_request`), or the administrator's connector name in the Claude
+desktop app (`mcp__claude_ai_Commotion_Agent_UAT__commotion_request`). **Match on the environment
+word, not on a fixed prefix**, and never assume a default — least of all dev3.
+
+1. **The user's words win.** If they name an environment, use the connector whose name identifies it.
+2. **Exactly one connector available → use it**, no question needed.
+3. **Several available and the user hasn't said → ask once**, listing the environments you can see.
+   Then use that one connector for **every** call for the rest of the task. Never mix connectors
+   within a task.
+4. **If no tool name clearly identifies an environment, ask rather than guess.** Name the connectors
+   you can see and let the user choose.
+5. **State which environment you are working in** in your first substantive reply — and again,
+   plainly, before the first write to a production connector.
+6. **Never retry a failed call on a different connector.** A `401`/unauthenticated error means that
+   connector has not been authorized — tell the user to connect it in their client's connector
+   settings. It never means "try another environment".
+
+Where this file names `commotion_request`, `commotion_schema` or `commotion_analyzer` without a
+prefix, it means that tool **on the connector you selected here**.
 
 ## Prerequisites (verified live — the test set is only runnable if these hold)
 

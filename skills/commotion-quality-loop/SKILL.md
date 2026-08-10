@@ -13,9 +13,9 @@ description: >-
   worker meant to actually go live for real traffic (even if the user doesn't name a pass-rate). For a
   SINGLE step, defer to the specialist instead: build only → commotion-create-worker; scenarios only →
   commotion-generate-scenarios; run evals only → commotion-run-evals; improve only →
-  commotion-improve-worker. Calls the dev3 backend through the thin Commotion MCP server (OAuth — no
+  commotion-improve-worker. Calls the Commotion backend through the thin Commotion MCP server (OAuth — no
   API key in the transcript).
-allowed-tools: Read, AskUserQuestion, Skill, mcp__commotion__commotion_request
+allowed-tools: Read, AskUserQuestion, Skill, mcp__commotion-dev3__commotion_request, mcp__commotion-tcuat__commotion_request, mcp__commotion-tcprod__commotion_request
 ---
 
 # Commotion: Quality Loop (end-to-end orchestrator)
@@ -39,6 +39,36 @@ opens a Commotion login in the browser and attaches the user's token to every ca
 and every specialist it invokes via **Skill**. Never ask the user for an email/password or a token,
 and don't pass a `token` argument. If the tools aren't available, the MCP isn't connected — ask the
 user to authorize it via `/mcp`.
+
+## Pick the environment before the first tool call
+
+Commotion runs in several environments — dev3, tcuat, tcprod — and **each one has its own connector
+exposing its own copy of these tools**. They are separate backends holding different data, and one of
+them is **production**. Picking the wrong one is the most damaging mistake available in this skill,
+and nothing downstream will catch it: the guarantee is this instruction, not an enforcement.
+
+**Read the environment off the tool name.** Tools are namespaced by the connector they came from, and
+the environment appears in that name — `dev3`, `tcuat`/`UAT`, `tcprod`/`Prod`. The exact shape depends
+on where you are running: a plugin-declared server name in Claude Code
+(`mcp__commotion-tcuat__commotion_request`), or the administrator's connector name in the Claude
+desktop app (`mcp__claude_ai_Commotion_Agent_UAT__commotion_request`). **Match on the environment
+word, not on a fixed prefix**, and never assume a default — least of all dev3.
+
+1. **The user's words win.** If they name an environment, use the connector whose name identifies it.
+2. **Exactly one connector available → use it**, no question needed.
+3. **Several available and the user hasn't said → ask once**, listing the environments you can see.
+   Then use that one connector for **every** call for the rest of the task. Never mix connectors
+   within a task.
+4. **If no tool name clearly identifies an environment, ask rather than guess.** Name the connectors
+   you can see and let the user choose.
+5. **State which environment you are working in** in your first substantive reply — and again,
+   plainly, before the first write to a production connector.
+6. **Never retry a failed call on a different connector.** A `401`/unauthenticated error means that
+   connector has not been authorized — tell the user to connect it in their client's connector
+   settings. It never means "try another environment".
+
+Where this file names `commotion_request`, `commotion_schema` or `commotion_analyzer` without a
+prefix, it means that tool **on the connector you selected here**.
 
 ## When to use this (vs a specialist)
 

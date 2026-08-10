@@ -1,5 +1,155 @@
 # Changelog
 
+## 2026-08-10 — 1.8.0 — Skills, the first message, and ACW: three backend features the skills could not reach
+
+The backend shipped three capabilities the plugin had **no** coverage of. A grep proved the gap:
+zero hits for `greetingInstructions` or any agent-skills feature, and exactly two passing mentions of
+"ACW" that referenced it without ever saying what it was or how to wire it. So a worker built by
+`commotion-create-worker` could not use any of them, and `commotion-improve-worker` had no lever to
+reach for when a prompt had simply grown too long to attend to.
+
+All three were established by **building a real worker end to end on dev3 on 2026-08-10** — `Skills
+Probe Clinic` plus its `[ACW] Skills Probe Clinic` target — rather than by reading schemas. That
+mattered: three of the rules below are things the schema states and the server does not enforce, and
+one is a field the schema advertises on an object that rejects it.
+
+- **Skills are progressive disclosure, not prompt injection — and that is the whole point.** New
+  reference `skills-and-progressive-disclosure.md`. A skill (`POST /ai-worker-skill`, id returned as
+  `aiWorkerSkillId`) is a named, described instruction block. At runtime the system prompt carries only
+  an `<available_skills>` manifest of names and descriptions; the platform auto-registers a built-in
+  **`read_skill(name)`** tool and the body arrives only when a turn calls it. Measured on the probe
+  worker: **870 input tokens on the manifest turn, 1053 after the body loaded**, with the agent quoting
+  figures that exist nowhere but inside the skill. This is the answer to "the prompt is too long".
+
+- **The `description` is the routing signal, and it decides whether a skill works at all.** It is the
+  only thing the model sees when choosing to load. Documented as a tool-description discipline (say
+  *when* to use it, in the caller's words) with the corollary now in the improve-worker failure→fix
+  taxonomy: when an agent invents an answer a skill already covers, **fix the description, not the
+  body** — the body was never read.
+
+- **`aiWorkerSkillIds` binds; `[skill:<name>]` only hints.** Unlike every other mention token, the
+  skill token is never expanded — it stays literal in the resolved prompt. The manifest is built from
+  the id array on `AiAgentRequest`. Both are now in the token table in `tools-and-capabilities.md`,
+  with the asymmetry called out, because a `[skill:X]` with no bound id is a dangling reference that
+  produces no error at all.
+
+- **Two silent-acceptance traps, both verified.** A skill id belonging to a *different* worker is
+  accepted into `aiWorkerSkillIds` with a `200` and never resolves. And `greetingInstructions`, whose
+  schema says only state and system variables may be referenced, happily stored a greeting containing
+  `[skill:…]` and `[knowledge:…|id:…]` — the caller would simply hear the raw token. Both are now
+  authoring rules the skills police, plus a new readiness-gate check in Phase 9 that catches the first
+  one, since nothing else will.
+
+- **ACW belongs on the worker, not the agent — the schema misleads here.** `AiAgentRequest`
+  advertises `advancedSettingsRequest.acwMetadataRequest`, but a voice agent rejects the entire block:
+  `400 "Advanced settings is not supported for VOICE_AGENT type."` Since ACW is a voice feature, the
+  real path is `workerVoiceSettingsRequest.workerAdvancedVoiceSettingsRequest.acwMetadataRequest`. New
+  Phase 8.7 covers the fixed build order — create the `[ACW] <name>` worker, configure its agent,
+  **deploy it**, then reference it — because a draft target fails with `400 "ACW live worker not found
+  with ID: …"`. Also documented: sending `voiceAgentType` alongside the ACW block drags in telephony
+  validation (`connectionId cannot be blank`), so omit it.
+
+- **Skill ids survive a version bump**, same as agent ids: `POST /aiworker/{id}/draft` carried both
+  skills into v1 with `aiWorkerSkillId` unchanged, so `aiWorkerSkillIds` keeps resolving across
+  revert → edit → redeploy. Folded into the existing id-stability paragraph rather than restated.
+
+- **Skills get a dangling-reference check of their own**, the analogue of `registered_tools` for tools:
+  `/api/chat/session/<id>` → `config.skills[]` carries `isReferenced` and `referencedBy[]`, and a
+  `read_skill` call is visible in `runs[].tools`. An answer on a skill's topic with no `read_skill` in
+  that turn is an ungrounded answer. Added to `commotion-debug/references/call-analyzer-api.md`.
+
+### Round 2 — how the reference tokens actually resolve
+
+Prompted by an observation that skills render as chips in the editor while tools and knowledge look
+like plain text, a second pass added a tool and a knowledge source to the same probe worker and traced
+each. The answer is that the chip/text distinction is cosmetic and the real mechanism is uniform.
+
+- **No mention token is string-substituted; every one becomes a tool call.** `[skill:…]` →
+  `read_skill`, `[knowledge:…|id:…]` → `search_knowledge_base`, `[tool:…]` → the registered action.
+  The model always sees the raw token in the prompt — the UI chip is a display layer over the same
+  literal text, which is why `finalInstructions` still shows the token.
+- **The `|id:` in a knowledge token is the retrieval filter, which finally explains the token-shape
+  asymmetry the reference documented but never justified.** The observed call is
+  `search_knowledge_base(query, filters:[{"key":"id","value":"<id from the token>"}])`; the id scopes
+  the search to one document. A wrong id doesn't error — the search returns empty and the agent
+  answers from nothing.
+- **Tokens work from inside a skill body, all three kinds.** A `[tool:…]` that appeared *only* in a
+  skill body was still registered and called; so was a `[knowledge:…|id:…]`. This extends the
+  compose-ability claim from skills-calling-skills to the full token set.
+- **Attaching a skill is now documented as two mandatory steps**, not one: bind the id in
+  `aiWorkerSkillIds` *and* reference it from the agent's `instructions` with `[skill:<name>]`. The id
+  array is what makes the skill reachable; the token is what puts it in the agent's own procedure at
+  the right point in the flow, keeps the routing legible to whoever reads the prompt next, and makes
+  it reviewable in the Phase 9 gate. The readiness check now runs in both directions.
+- **⚠ Tool action names are re-minted per worker version**, and the platform rewrites `[tool:…]`
+  tokens (in agent prompts *and* skill bodies) when a draft is forked: the same tool was
+  `check-slot-availability-2135` at v1 and `-2136` at v2. Live references keep working; hand-copied
+  ones do not.
+- **⚠ A rule inside a skill body is not a stronger rule.** A skill saying "Never invent slots" did not
+  stop the agent inventing three after the tool returned none. The grounding rule belongs in the agent
+  prompt, where it covers every turn.
+- **⚠ In Call Analyzer, a custom tool is listed under an opaque MCP-server hash**, not its action name
+  — the names are inside `functions_vs_metadata`. Searching `config.tools[]` for the action name finds
+  nothing and reads as "not wired".
+
+### Two corrections picked up along the way
+
+- **`POST /aiagent` on a `SINGLE_AGENT` worker is refused**, not merely redundant:
+  `400 "Cannot create another agent. Single Agent setup allows only one agent."` The reference said the
+  default agent was the convenient path; it is the only one.
+- **`languageModelSettingsRequest.temperature` is required** on an agent write —
+  `400 "…temperature is required."` — despite not appearing in the schema's `required` list.
+
+## 2026-08-07 — 1.7.0 — One plugin, three environments: dev3, tcuat and tcprod connectors
+
+The skills were pinned to dev3 by exactly one line — `plugin.json`'s MCP server URL. Everything else
+was already environment-agnostic: a sweep for absolute URLs across `skills/` returns only `react.dev`
+and `example.com` placeholders, because every Commotion call goes through `commotion_request` /
+`commotion_schema` / `commotion_analyzer` and therefore inherits whatever server it is routed to.
+
+- **`plugin.json` now registers three MCP servers** — `commotion-dev3`, `commotion-tcuat`,
+  `commotion-tcprod` — each with its environment's URL hardcoded. One repo, one branch, one install
+  link, and **nothing for the user to configure**: install the plugin, then `/mcp` → authenticate the
+  connector for the environment you work in. Connectors you never authenticate sit idle. An earlier
+  draft used a `${COMMOTION_MCP_URL:-…}` environment variable; that was dropped because it made every
+  non-dev3 user set a variable before launching, which is exactly the friction this avoids.
+
+- **Tool names are now environment-scoped**, since MCP namespaces tools by server:
+  `mcp__commotion-tcuat__commotion_request` and so on. Every skill's `allowed-tools` was expanded to
+  cover all three connectors (e.g. create-worker went from 7 entries to 13).
+
+- **Each skill now opens with "Pick the environment before the first tool call"** — the first `##`
+  section in all six. Several identical tool sets is a real hazard when one of them is production, so
+  the rule is explicit: the user's words win; exactly one connector available means use it; several
+  and no instruction means ask once and then use that one connector for the whole task; state the
+  environment in the first substantive reply and again before the first write to a production
+  connector; and **never retry a failed call on a different connector** — a `401` means that connector
+  is not authorized, not that another environment should be tried.
+
+  The rule identifies the environment by **the environment word in the tool name, not a fixed
+  prefix**, because the namespace differs by client: `mcp__commotion-tcuat__commotion_request` in
+  Claude Code (from `plugin.json`), but `mcp__claude_ai_Commotion_Agent_UAT__commotion_request` in the
+  Claude desktop app, where it comes from whatever the administrator named the connector. An earlier
+  draft hardcoded the Claude Code prefixes and was simply wrong in the desktop app — it told Claude to
+  look for names that do not exist there. Two consequences for admins: a desktop connector binds to
+  the plugin **by URL**, so it must match `plugin.json` exactly; and its **name must make the
+  environment obvious**, since that string is the only signal the skills get.
+
+- **`commotion-debug` handles an absent Call Analyzer.** The analyzer plane is opt-in per environment,
+  and its route is not yet exposed on tcuat/tcprod. The skill now stops and says Call Analyzer is
+  unavailable on the connected environment, offering commotion-improve-worker instead, rather than
+  reconstructing a call from BE REST data and presenting that as RCA.
+
+- **De-dev3'd the prose that describes where the skills point** — all six `description:` frontmatters,
+  `README.md` (new **Choosing an environment** section with the connector table), `marketplace.json`,
+  and `references/api-and-auth.md`. Statements recording *what was observed on dev3* are deliberately
+  untouched: "verified live against dev3 on <date>" is a historical fact, and the known-dev3-bug notes
+  (e.g. `mcp-server` tool create returning 500) may not hold elsewhere.
+
+Server-side counterpart: `commotion-mcp` 0.2.0 adds the tcuat/tcprod chart environments. The BE OAuth
+provider is not yet released on either, so authenticating those two connectors will not complete yet;
+`commotion-dev3` works today.
+
 ## 2026-08-07 — 1.6.0 — `PUT /aiagent/{id}` renders in the UI: the delete-and-re-POST rule for prompts is retired
 
 The platform's prompt editor now reflects a `PUT`, which reverses the single most invasive rule in these

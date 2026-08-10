@@ -17,6 +17,7 @@ deploy call behaves unexpectedly. Field *shapes* come from `commotion_schema` `{
 | GET | `/aiworker` | list (live + draft) |
 | GET | `/aiworker/{id}` | retrieve **live** (`?version=N` for a specific version) |
 | GET | `/aiworker/{id}/versions` | version history |
+| GET | `/ai-worker-skill?aiWorkerId=&version=` · POST/PUT `/ai-worker-skill[/{aiWorkerSkillId}]` | a version's skills — see `skills-and-progressive-disclosure.md` |
 | GET | `/aiworker/metadata` · `/aimodel` | valid values / supported **language** models |
 | GET | `/aiworkervoice?providerId=&modelId=&languageId=&accentId=` | **the TTS voice catalogue** (`voiceId`, `voiceName`, sample audio) — one word, no separator |
 
@@ -52,6 +53,10 @@ five agents of four different types on two workers (only `createdDate` was resta
 `PUT` as the prompt path, **no routine operation churns an agent id**: revert → `PUT` → redeploy is
 id-stable end to end, so scenarios, ACW references and anything else pinned to `aiAgentId` survive a
 version bump. (Delete + re-POST still mints a new id — that is the one thing that breaks the chain.)
+
+**Skill ids ride along too (verified live 2026-08-10).** The same revert carried both of a worker's
+skills into v1 with their `aiWorkerSkillId` unchanged, so an agent's `aiWorkerSkillIds` keeps resolving
+across the bump — no re-binding needed. Same rule, same evidence: only `createdDate` was restamped.
 
 ## The edges
 
@@ -106,6 +111,49 @@ worker (it's rejected). Inspect the exact fallback field names with `commotion_s
 `voiceAgentPipelineType` + `workerVoiceConfiguration` on create is enough — the transcript/LLM
 sub-blocks default. The full provider→model→language map lives in
 `GET /aiworker/metadata` → `voiceConfig.voicePipelineTypeConfig`.
+
+## The first message — worker-level `greetingInstructions`
+
+A top-level string on `AiWorkerRequest` (agents carry their own; see `agents-and-orchestration.md` for
+the field's behaviour and its unenforced no-references rule). It survives deploy and revert-to-draft.
+Set it on the worker when the opening line is the same whoever picks up; set it per agent when each
+specialist should open differently.
+
+## After Call Work (ACW) — hand the finished call to a second worker
+
+ACW fires a **separate worker** once the call ends, to do post-call analysis, CRM updates and
+follow-ups. The convention is a non-voice worker named **`[ACW] <worker name>`** whose single agent
+does the wrap-up; you reference that worker and that agent.
+
+```jsonc
+workerVoiceSettingsRequest: {
+  workerAdvancedVoiceSettingsRequest: {
+    acwMetadataRequest: {
+      aiWorkerId: "<the ACW worker id>",   // REQUIRED — must be LIVE
+      aiAgentId:  "<its agent's id>",      // REQUIRED — must be LIVE
+      includeSessionState: true,           // send the voice session state along with the transcript
+      transcriptFormat: "MARKDOWN"         // JSON | MARKDOWN
+    }
+  }
+}
+```
+
+Build order, and it is not negotiable: **create the ACW worker → configure its agent → deploy it →
+only then reference it.** Pointing at a draft fails with `400 "ACW live worker not found with ID:
+<id>"` (verified live 2026-08-10).
+
+- **⚠ Use the worker-level block, not the agent one.** `AiAgentRequest.advancedSettingsRequest` also
+  advertises an `acwMetadataRequest` (with two extra fields, `acwDisabled` and `voiceInputTypeList` —
+  the latter accepts `TRANSCRIPT` | `AUDIO` but only `TRANSCRIPT` is supported today). It is
+  **unreachable for a voice agent**, which rejects the whole advanced-settings block — see
+  `agents-and-orchestration.md`. Since ACW is a voice feature, worker level is the real path.
+- **⚠ Don't send `voiceAgentType` unless you mean it.** Including it in
+  `workerAdvancedVoiceSettingsRequest` pulls in telephony validation:
+  `400 "Worker advanced voice settings connectionId cannot be blank when voiceAgentType is given."`
+  Omit it and the ACW block saves cleanly on a worker that has no DID yet (verified live 2026-08-10).
+- **`PUT /aiworker/{id}` is a full replace**, and ACW now lives *inside* the voice block — resend the
+  whole `workerVoiceSettingsRequest` (pipeline type, voice config, LLM config) alongside it, or you
+  will reset the voice settings while adding ACW.
 
 ## Providers and credentials — pick the provider; the credential follows (verified live 2026-08-06)
 

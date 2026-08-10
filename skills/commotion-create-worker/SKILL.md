@@ -8,10 +8,10 @@ description: >-
   Use this whenever the user wants to create / build / set up a worker, voice agent, assistant, or
   bot for a use case — e.g. "make a voice agent that books dealership test drives in Hindi and
   English", "set up a multi-agent support bot for my client" — even if they don't say the word
-  "worker". Handles the dev3 lifecycle (draft↔live versions, single vs multi-agent, enabling the
-  agent, the voice/language schema). Calls the dev3 backend through the thin Commotion MCP server
+  "worker". Handles the worker lifecycle (draft↔live versions, single vs multi-agent, enabling the
+  agent, the voice/language schema). Calls the Commotion backend through the thin Commotion MCP server
   (OAuth — no API key in the transcript).
-allowed-tools: Read, AskUserQuestion, Bash, Skill, mcp__commotion__commotion_request, mcp__commotion__commotion_schema, mcp__commotion__commotion_analyzer
+allowed-tools: Read, AskUserQuestion, Bash, Skill, mcp__commotion-dev3__commotion_request, mcp__commotion-tcuat__commotion_request, mcp__commotion-tcprod__commotion_request, mcp__commotion-dev3__commotion_schema, mcp__commotion-tcuat__commotion_schema, mcp__commotion-tcprod__commotion_schema, mcp__commotion-dev3__commotion_analyzer, mcp__commotion-tcuat__commotion_analyzer, mcp__commotion-tcprod__commotion_analyzer
 ---
 
 # Commotion: Create a Worker
@@ -31,6 +31,36 @@ the worker (orchestration, voice, guardrails), then provision + **enable** its a
 `AskUserQuestion` and get a clear "yes" before `deploy` (Phase 10). Drafting/creating/editing on a
 draft is fine to do as you go (each write shown), but **never deploy a worker live without
 confirmation.**
+
+## Pick the environment before the first tool call
+
+Commotion runs in several environments — dev3, tcuat, tcprod — and **each one has its own connector
+exposing its own copy of these tools**. They are separate backends holding different data, and one of
+them is **production**. Picking the wrong one is the most damaging mistake available in this skill,
+and nothing downstream will catch it: the guarantee is this instruction, not an enforcement.
+
+**Read the environment off the tool name.** Tools are namespaced by the connector they came from, and
+the environment appears in that name — `dev3`, `tcuat`/`UAT`, `tcprod`/`Prod`. The exact shape depends
+on where you are running: a plugin-declared server name in Claude Code
+(`mcp__commotion-tcuat__commotion_request`), or the administrator's connector name in the Claude
+desktop app (`mcp__claude_ai_Commotion_Agent_UAT__commotion_request`). **Match on the environment
+word, not on a fixed prefix**, and never assume a default — least of all dev3.
+
+1. **The user's words win.** If they name an environment, use the connector whose name identifies it.
+2. **Exactly one connector available → use it**, no question needed.
+3. **Several available and the user hasn't said → ask once**, listing the environments you can see.
+   Then use that one connector for **every** call for the rest of the task. Never mix connectors
+   within a task.
+4. **If no tool name clearly identifies an environment, ask rather than guess.** Name the connectors
+   you can see and let the user choose.
+5. **State which environment you are working in** in your first substantive reply — and again,
+   plainly, before the first write to a production connector.
+6. **Never retry a failed call on a different connector.** A `401`/unauthenticated error means that
+   connector has not been authorized — tell the user to connect it in their client's connector
+   settings. It never means "try another environment".
+
+Where this file names `commotion_request`, `commotion_schema` or `commotion_analyzer` without a
+prefix, it means that tool **on the connector you selected here**.
 
 ## When to use this
 
@@ -96,7 +126,8 @@ attaching source material / FAQ grounding, see `references/knowledge-and-rag.md`
 fallback models, and structured output, see `references/control-and-reliability.md`; for Settings —
 pronunciation dictionaries and state variables (Phase 8.5) — see
 `references/settings-variables-pronunciation.md` (their request schemas are `AiPronunciationDictRequest`
-and `AiWorkerVariableSchemaRequest`).
+and `AiWorkerVariableSchemaRequest`); for skills — instruction blocks the agent loads on demand
+(Phase 8.6) — see `references/skills-and-progressive-disclosure.md` (`AiWorkerSkillRequest`).
 
 If the goal implies the worker must **act** (do something, not just answer), also ground in the tool
 surface: `commotion_request` `GET /ai-worker-tool/metadata` (the built-in action catalog) and
@@ -157,6 +188,12 @@ Build a candidate `AiWorkerRequest` grounded in Phase 0. Hold it as the `body` y
   actual behaviour. For `MULTI_AGENT`, this is the **orchestrator/routing** prompt (which agent
   handles what). Voice workers: spoken-style — short sentences, no markdown/lists/special characters,
   one question at a time, read names/numbers back (this style applies to whatever the agent *says*).
+- **`greetingInstructions`** — how the worker opens the conversation. Write *instructions for the
+  greeting*, not just a sentence ("Open with: … — do not add anything before it"), since the model
+  still generates the turn. Only state/system variables may be referenced — **no `[tool:…]`,
+  `[knowledge:…]`, `[agent:…]` or `[skill:…]`**; the backend does not reject them, it just leaves the
+  raw token for the caller to hear. Agents carry their own `greetingInstructions`, so set it there
+  instead when each specialist should open differently.
 - **Voice + languages** (if voice-enabled) — set the voice block; list every language in
   `workerVoiceSettingsRequest.workerVoiceConfiguration.allowedLanguages` (that block also needs
   `model` / `provider` / `voiceId`, or let backend defaults stand). **Pick the `voiceId` from the voice
@@ -499,6 +536,70 @@ off-limits answer → add a guardrail; a blocked legitimate request → loosen o
 already has" → state variable; "bot mispronounces our brand" → pronunciation entry — see
 `commotion-improve-worker`.
 
+## Phase 8.6 — Skills (keep the long instructions out of the context window)
+
+A **skill** is a named, described block of instructions stored beside the worker. The agent's prompt
+carries only a manifest of every attached skill's `name` + `description`; the body arrives **only when
+the agent calls the built-in `read_skill(name)` tool** on a turn that needs it. Verified live: a
+cancellation question cost 870 input tokens on the manifest turn and 1053 after the body loaded — the
+policy text costs nothing on the turns that don't touch it. Full behaviour:
+`references/skills-and-progressive-disclosure.md`.
+
+**Ask yourself before Phase 9: is any part of this prompt a self-contained topic the agent needs only
+sometimes?** If yes, it belongs in a skill. The three cases that earn one:
+
+- **The prompt has grown long** — the classic symptom is the agent ignoring rules buried mid-prompt.
+  Split each topic out; what's left is routing.
+- **Per-topic policy blocks** — cancellation rules, eligibility criteria, fee tables. Only the topic in
+  play is ever in context, so one policy can't bleed into another.
+- **A procedure several agents share** — one skill, bound to each agent, one place to edit.
+
+Not a skill: retrieval over documents (that's knowledge, Phase 7) or anything with a side effect or a
+live lookup (that's a tool, Phase 8). `read_skill` only returns text you wrote.
+
+Create on the draft, then bind:
+
+```
+POST /ai-worker-skill  {aiWorkerId, version, name, description, instructions}   # all five required
+   → the id comes back as `aiWorkerSkillId` (not `id`); `name` is unique per worker version
+PUT  /aiagent/{id}     {…full body…, "aiWorkerSkillIds": ["<id>", …]}           # THIS is the binding
+```
+
+Two rules that decide whether skills work at all:
+
+- **Write the `description` as a routing signal, not a title.** It is the *only* thing the model sees
+  when deciding to load the skill — say when to use it, in the caller's words ("Use whenever the caller
+  asks to cancel, reschedule, or asks about charges for missing an appointment"). A vague description
+  is the number-one reason a skill silently never fires.
+- **`aiWorkerSkillIds` binds; `[skill:<name>]` only hints.** Unlike `[tool:…]`, the token is never
+  expanded — it stays literal in the prompt. Write it *and* bind the id. A `[skill:X]` with no matching
+  id is a dangling reference: no error, the agent just answers from general knowledge instead.
+
+⚠ Skill ids are **not** checked for ownership — an id from another worker is accepted with a `200` and
+silently never resolves. Only bind ids from `GET /ai-worker-skill?aiWorkerId=<this>&version=<this>`.
+
+## Phase 8.7 — After Call Work (only if the call should trigger post-call work)
+
+If the use case needs something to happen *after* the call — a CRM update, a wrap-up summary, a
+follow-up task — that is **ACW**: a second worker the platform fires when the call ends. Ask whether
+the goal implies post-call work; if it doesn't, skip this phase.
+
+Build order is fixed, because the reference is validated:
+
+1. `POST /aiworker` a non-voice worker named **`[ACW] <worker name>`** (the convention).
+2. `PUT` its auto-provisioned agent with the wrap-up instructions and `aiAgentEnabled: true`.
+3. **Deploy it** — `POST /aiworker/<acw-id>/deploy?version=0`. A draft target fails with
+   `400 "ACW live worker not found with ID: …"`.
+4. Point the *voice* worker at it with `PUT /aiworker/{id}`, inside the voice block:
+   `workerVoiceSettingsRequest.workerAdvancedVoiceSettingsRequest.acwMetadataRequest =
+   {aiWorkerId, aiAgentId, includeSessionState, transcriptFormat: "JSON"|"MARKDOWN"}`.
+
+⚠ Two traps, both verified live: **the agent-level `acwMetadataRequest` is unreachable on a voice
+agent** (`400 "Advanced settings is not supported for VOICE_AGENT type."`) — use the worker block; and
+**don't send `voiceAgentType`** alongside it unless you're also wiring telephony, or you get
+`400 "connectionId cannot be blank when voiceAgentType is given."` Remember `PUT /aiworker/{id}` is a
+full replace — resend the whole voice block. Details: `references/aiworker-lifecycle.md`.
+
 ## Phase 9 — Deploy readiness gate
 
 Confirm with `GET /aiagent?workerId=<worker-id>&version=0` before deploying:
@@ -514,6 +615,12 @@ Confirm with `GET /aiagent?workerId=<worker-id>&version=0` before deploying:
   and **tell the user the worker will have no grounding until the first crawl runs** — that's a real
   deploy consideration, not a footnote.
 - If you attached tools (Phase 8) → `GET /ai-worker-tool?aiWorkerId=<worker-id>&version=0` shows them as expected.
+- If you created skills (Phase 8.6) → check **both directions**: every `[skill:<name>]` in an agent's
+  `instructions` has a matching id in that agent's `aiWorkerSkillIds`, **and** every id in
+  `aiWorkerSkillIds` is referenced by a `[skill:<name>]` somewhere in those `instructions`. Also
+  confirm every id came from *this* worker's `GET /ai-worker-skill`. None of these mismatches produces
+  an error, so this check is the only thing that catches them.
+- If you wired ACW (Phase 8.7) → the referenced ACW worker is **LIVE** and its agent is enabled.
 
 ## Phase 10 — Deploy  ·  ALWAYS ASK FIRST
 
