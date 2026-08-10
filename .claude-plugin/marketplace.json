@@ -8,7 +8,7 @@
       "name": "commotion",
       "source": "./",
       "description": "Commotion Agent Operations \u2014 skills that build, configure, deploy, test, evaluate, iteratively improve, and debug voice/chat workers, calling the Commotion backend and Call Analyzer through a thin OAuth MCP server.",
-      "version": "1.8.0"
+      "version": "2.0.0"
     }
   ]
 }
