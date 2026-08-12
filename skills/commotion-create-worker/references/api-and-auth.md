@@ -1,7 +1,7 @@
 # API & transport — the two Commotion MCP tools
 
 This is the single "how to call it" reference. Every platform action is one call through the
-connected **Commotion MCP** server, which holds the credential and reaches the dev3 backend for you.
+connected **Commotion MCP** server, which holds the credential and reaches the Commotion backend for you.
 The domain reference files (`aiworker-lifecycle.md`, `agents-and-orchestration.md`, …) describe the
 *behavior*; this file is the *transport*.
 
@@ -31,13 +31,24 @@ Auth is owned by the MCP client + server; you never handle a credential or token
 Commotion MCP, the client opens a Commotion login in the browser (OAuth 2.1 authorization-code +
 PKCE); the user signs in once, and the client then attaches the resulting token as
 `Authorization: Bearer` on **every** call automatically. The MCP server validates/forwards it to the
-dev3 backend — the raw token never enters the conversation.
+Commotion backend — the raw token never enters the conversation.
 
 So: **never** ask the user for an email/password, **never** pass a `token` argument, and never reuse
-another user's token. dev3 attributes actions to the signed-in user (e.g. a created worker's
+another user's token. The backend attributes actions to the signed-in user (e.g. a created worker's
 `createdByUserId` is their email). If the two tools aren't available at all, the Commotion MCP isn't
-connected — ask the user to add/authorize it via `/mcp` (select `commotion` → Authenticate). (Swagger
-UI for humans: `https://api-tier0.dev3.gocommotion.com/swagger-ui/index.html`.)
+connected — ask the user to add/authorize it via `/mcp` (select that environment's connector →
+Authenticate).
+
+**One connector per environment.** Each Commotion environment has its own connector exposing its own
+copy of these tools, so `commotion_request` exists once per environment under a different namespace.
+The exact tool name depends on the client — `mcp__commotion-tcuat__commotion_request` in Claude Code,
+`mcp__claude_ai_Commotion_Agent_UAT__commotion_request` in the Claude desktop app, where the name
+comes from whatever the administrator called the connector. Identify the environment by the
+environment word in the name, not by a fixed prefix; pick one (see "Pick the environment before the
+first tool call" in the SKILL) and use it for every call in the task. A `401` from one connector means
+it is not authorized — never a reason to retry on another environment. Where this file writes
+`commotion_request` unprefixed, it means the tool on the environment you selected. (Swagger UI for humans, per environment:
+`https://api-tier0.<env>.gocommotion.com/swagger-ui/index.html`.)
 
 ## Error semantics
 
@@ -98,6 +109,17 @@ not here.**
 | POST | `/aiagent/standard` | create a *standard* agent (e.g. FAQ) | `CreateStandardAgentRequest` |
 | PUT | `/aiagent/{id}` | update an agent in place (prompt, name, enable/disable, model) — **renders in the UI editor**; keeps the agent id. Full replace: resend kept fields | `AiAgentRequest` |
 | DELETE | `/aiagent/{id}?version=N` | delete an agent (`version` query param required) | — |
+
+### Skills (`ai-worker-skill`) — instruction blocks the agent loads on demand
+| Method | Path | Purpose | Schema |
+|--------|------|---------|--------|
+| GET | `/ai-worker-skill?aiWorkerId=&version=` | list a version's skills (id field is `aiWorkerSkillId`) | — |
+| POST | `/ai-worker-skill` | create a skill on a draft | `AiWorkerSkillRequest` |
+| PUT | `/ai-worker-skill/{aiWorkerSkillId}` | full update (keeps the id) | `AiWorkerSkillRequest` |
+
+`(worker, version)`-scoped. Bound to an agent through `aiWorkerSkillIds` on the `AiAgentRequest`, which
+puts a **name + description manifest** in the system prompt and lets the agent pull each body in via a
+built-in `read_skill(name)` tool — full behaviour in `references/skills-and-progressive-disclosure.md`.
 
 ### Knowledge & files
 | Method | Path | Purpose | Schema |
@@ -168,7 +190,7 @@ Auto-provisioned per worker; see `references/knowledge-and-rag.md`.
 
 ## Schema names for `commotion_schema`
 
-`AiWorkerRequest`, `AiAgentRequest`, `CreateStandardAgentRequest`, `CreateAiWorkerKnowledgeItemRequest`,
+`AiWorkerRequest`, `AiAgentRequest`, `AiWorkerSkillRequest`, `CreateStandardAgentRequest`, `CreateAiWorkerKnowledgeItemRequest`,
 `UpdateAiWorkerKnowledgeNameRequest`, `CreateAndUploadTextFileRequest`, `FileUploadUrlRequest`,
 `FileDeleteRequest`, `CreateCustomToolRequest`, `CreateBuiltInActionsToolRequest`,
 `CreateCodeBlockToolRequest`, `RunCodeBlockRequest`,

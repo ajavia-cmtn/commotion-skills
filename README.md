@@ -1,7 +1,8 @@
 # Commotion Skills
 
 Claude Skills for operating Commotion voice/chat agents. The skills carry the endpoints and judgment
-(the "brain") and reach the Commotion **dev3 backend** through a **thin Commotion MCP server** that
+(the "brain") and reach the Commotion **backend** — dev3, tcuat or tcprod, see
+[Choosing an environment](#choosing-an-environment) — through a **thin Commotion MCP server** that
 holds auth and proxies each call — `commotion_request` + `commotion_schema` (plus the read-only
 `commotion_analyzer` for the debugging plane), **OAuth**,
 and **no API key in the transcript**. Each skill fetches request schemas live from the OpenAPI spec
@@ -24,7 +25,7 @@ Ground in schema → interview → draft → approve → create (draft) → enab
 
 Building a worker isn't the end — a worker that *behaves well* is. Four skills compose into a closed
 quality loop that builds, tests, and iteratively improves a worker until it clears an eval-score
-threshold. The scenario/simulation/eval endpoints are part of the **same** dev3 backend, so the loop
+threshold. The scenario/simulation/eval endpoints are part of the **same** backend, so the loop
 skills reuse the same transport (the Commotion MCP) as create-worker.
 
 ```
@@ -89,6 +90,7 @@ skills/
       tools-and-capabilities.md       # built-in/custom/code-block/MCP-server/connector tools, A2A, HITL
       control-and-reliability.md      # guardrails, fallback models, structured output
       settings-variables-pronunciation.md  # Settings: pronunciation dictionaries + state variables
+      skills-and-progressive-disclosure.md # skills: instruction blocks the agent loads on demand
   commotion-generate-scenarios/
     SKILL.md                          # build a test set: personalities + scenarios for a worker/version
     references/
@@ -155,8 +157,41 @@ Once published to the team plugin marketplace:
 ```
 
 The skill then appears as `/commotion:commotion-create-worker` and auto-triggers when you ask Claude
-to build a worker/voice agent. On first use, authorize the Commotion MCP (`/mcp` → **commotion** →
-Authenticate) — a one-time browser login; no key to set.
+to build a worker/voice agent. On first use, authorize the connector for the environment you work in
+(`/mcp` → **commotion-dev3** / **commotion-tcuat** / **commotion-tcprod** → Authenticate) — a one-time
+browser login; no key to set, nothing to configure. See
+[Choosing an environment](#choosing-an-environment).
+
+### Choosing an environment
+
+One plugin, one link, every environment. The plugin registers **three connectors** — one per
+Commotion environment — and you authenticate only the one you work in:
+
+| Connector | Backend |
+|---|---|
+| `commotion-dev3` | `https://commotion-mcp-default.dev3.gocommotion.com/mcp` |
+| `commotion-tcuat` | `https://commotion-mcp-default.tcuat.gocommotion.com/mcp` |
+| `commotion-tcprod` | `https://commotion-mcp-default.tcprod.gocommotion.com/mcp` |
+
+Install the plugin, then connect the one for your environment — `/mcp` in Claude Code, or the
+plugin's **Connectors** tab in the Claude desktop app — and **Authenticate**. There is nothing to
+configure and no environment variable to set. Connectors you never authenticate sit idle; authenticate
+a second one later if you need to work across environments.
+
+**Connector names differ by client.** In Claude Code the names above come from `plugin.json`. In the
+Claude desktop app the plugin binds to connectors your organisation's admin has already added, and the
+tool names follow *their* naming (e.g. `Commotion Agent UAT`). Binding is by **URL**, so an admin
+connector must use exactly the URL above to be matched — and its name should make the environment
+obvious, because that name is the only signal the skills have when deciding which environment they are
+working in.
+
+The skills carry no hostname of their own — they use whichever connector you selected — so each skill
+starts by establishing which environment it is working in, states it in its first reply, and uses that
+one connector for the whole task. `commotion-tcprod` is production: a skill will say so before writing
+to it, and will never silently retry a failed call against a different environment.
+
+**Not yet live:** the redesigned BE OAuth provider has not shipped to tcuat or tcprod, so
+authenticating those two connectors will not complete yet. `commotion-dev3` works today.
 
 ## Relationship to `commotion-mcp`
 

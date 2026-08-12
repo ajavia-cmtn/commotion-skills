@@ -354,6 +354,31 @@ Call Analyzer UI.
   `initialContextCost.toolCount: 1` means "one tool, and it's built-in" — not "a custom tool is wired".
   Read the names. A `[tool:<name>]` in the prompt with no matching entry is a dangling reference, and at
   runtime it surfaces as `toolCallMetrics[].result == "Error: function '<name>' is not registered."`
+- **Skills have their own dangling-reference check, and it is the skill analogue of `registered_tools`.**
+  `/api/chat/session/<id>` → `config.skills[]` lists every skill the agent advertised, each with
+  `name`, `description`, `rawInstructions`, **`isReferenced`** and **`referencedBy[]`**. Two distinct
+  failures to look for: a `[skill:<name>]` in the prompt with **no matching entry** in `config.skills[]`
+  (bound id missing — the agent had no such skill to read, and will usually answer from general
+  knowledge instead of admitting it), and an entry with **`isReferenced: false`** — bound but never
+  pointed at from the prompt, which is a half-finished attachment: add the `[skill:<name>]` reference
+  to the agent's `instructions` so the routing is explicit and reviewable.
+- **⚠ A custom tool is listed under an opaque MCP-server hash, not its action name.** In
+  `/api/chat/session/<id>` → `config.tools[]`, a custom/connector tool appears as
+  `{name: "27bcd3ab9369455887171300d7f54cbf", type: "mcp"}` — searching that list for
+  `check-slot-availability-…` finds nothing. The action names live **inside** each entry, under the
+  `functions_vs_metadata` field (and `tool_data.included_actions`). Read those before concluding a
+  tool isn't wired.
+- **Every mention token resolves to a tool call, so the trace is where you prove any of them fired**
+  (verified live 2026-08-10): `[knowledge:…|id:…]` → `search_knowledge_base` with
+  `filters:[{key:"id", value:<the id>}]`; `[skill:…]` → `read_skill`; `[tool:…]` → the action itself.
+  A turn that answered a knowledge-backed question with **no `search_knowledge_base` call** was not
+  grounded, whatever the reply text implies — and an empty `references[]` on the run means the search
+  matched nothing (usually a wrong or stale id in the token).
+- **Skill loading is visible as a tool call.** The resolved system prompt carries an
+  `<available_skills>` manifest of names + descriptions only; the body arrives via the built-in
+  **`read_skill(name)`**, which shows up in `runs[].tools` / `steps` with the full instructions as its
+  result. If the agent answered a question a skill covers **without** a `read_skill` call in that turn,
+  the answer was not grounded in the skill — fix the skill's `description`, not its body.
 - **`transcription[]` contains `state_snapshot` rows**, not just `user`/`assistant` turns — they record
   state-variable changes mid-call and are useful, but don't count them as conversation turns.
 - **The plane is admin-scoped.** It returns unmasked transcripts and internal detail across every

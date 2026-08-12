@@ -271,6 +271,30 @@ renders in the UI editor). The tokens (all verified live):
 | Knowledge | `[knowledge:<name>\|id:<knowledgeId>]` | yes |
 | Another agent (hand off to it) | `[agent:<name>\|id:<agentId>]` | yes |
 | A variable | `[var:<name>]` | no |
+| A skill | `[skill:<name>]` | **no** — name only |
+
+⚠ **`[skill:…]` is the one token that is only a hint.** For tools, knowledge and agents the token *is*
+the binding. For skills the binding is the `aiWorkerSkillIds` array on the `AiAgentRequest`; the token
+stays literal in the resolved prompt and, on its own, does nothing. Write it anyway — it steers the
+model to the right skill at the right moment — but always bind the id too. See
+`skills-and-progressive-disclosure.md`.
+
+**None of these tokens is string-substituted — every one becomes a tool call (verified live
+2026-08-10).** The prompt the model sees contains the raw token; the runtime resolves it when the turn
+needs it. `[knowledge:…]` → `search_knowledge_base`, `[skill:…]` → `read_skill`, `[tool:…]` → the
+registered action itself. That is why the UI can show all of them as chips while the resolved
+`finalInstructions` still shows the literal text: the chip is a display layer, not an expansion.
+
+⚠ **This is why a knowledge token carries `|id:` and a tool token doesn't.** The observed call is
+`search_knowledge_base(query, filters: [{"key": "id", "value": "<the id from the token>"}])` — the id
+**is the retrieval filter**, scoping the search to that one document. A wrong or stale id doesn't
+error; the search just comes back empty and the agent answers from nothing.
+
+⚠ **Action names are re-minted per worker version.** The same custom tool was
+`check-slot-availability-2135` at v1 and `check-slot-availability-2136` at v2. The platform rewrites
+existing `[tool:…]` tokens (in agent prompts *and* skill bodies) when a draft is forked, so live
+references keep working — but **never hand-copy an action name across versions.** Re-read
+`GET /ai-worker-tool?aiWorkerId=…&version=<the version you are editing>` before writing a new one.
 
 The `<action name>` is the tool's **action** name, not the tool name and not its id — read it from
 `GET /ai-worker-tool?aiWorkerId=<id>&version=<draft>` → each tool's `actionMetaDataOutputList[].actionName`.

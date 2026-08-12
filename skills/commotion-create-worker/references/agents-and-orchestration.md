@@ -86,6 +86,9 @@ What this changes:
   the worker's channel (`CHAT_AGENT` / `VOICE_AGENT` / `STRUCTURED_OUTPUT`), so one `PUT` carrying
   `{name, description, instructions, aiAgentEnabled:true, modelConfigurationRequestList}` finishes the
   agent. Delete-then-POST still works and is not wrong — it's just extra calls plus a new id for no gain.
+  ⚠ **`POST /aiagent` on a `SINGLE_AGENT` worker is refused outright** (verified live 2026-08-10):
+  `400 "Agent creation failed: Cannot create another agent. Single Agent setup allows only one agent."`
+  The default is not merely the convenient path here — it is the only one, short of deleting it first.
 - **`MULTI_AGENT` → `PUT` the default into your first specialist, then `POST` the rest.** A worker needs
   more than one agent here, and only `POST` can add agents. (Disabling or deleting the default instead is
   still fine.)
@@ -161,7 +164,28 @@ Required: **`aiWorkerId`**, **`version`**, **`name`**, **`description`**. Useful
   (Use `FAQ_CHAT`/`FAQ_VOICE` for the FAQ behaviour; there is no generic-channel `FAQ`.)
 - **`instructions`** — the agent's system prompt / behaviour.
 - **`aiAgentEnabled`** — boolean; must be `true` to count toward the deploy gate.
+- **`greetingInstructions`** — how the agent opens the conversation. See "The first message" below.
+- **`aiWorkerSkillIds`** — array of `aiWorkerSkillId`s to advertise to this agent. This is the real
+  binding for skills; see `skills-and-progressive-disclosure.md`.
 - Plus `aiAgentSubscriptionRequestList`, `aiAgentTriggerInputList`, `structuredOutputConfig`, `imageUrl`.
+
+### The first message — `greetingInstructions`
+
+A plain string on the agent (and, at worker level, on `AiWorkerRequest`) that governs the agent's
+opening line. It is *instructions for the greeting*, not the literal text — "Open with: Northside
+Dental, this is Riya — how can I help you today? Do not add anything before it." works better than a
+bare sentence, because the model still generates the turn.
+
+**The schema's rule: only state and system variables may be referenced — no tool, knowledge, agent or
+skill references.** That makes sense (there is nothing to call yet at greeting time), but ⚠ **it is not
+enforced** — a greeting containing `[skill:…]` and `[knowledge:…|id:…]` was stored with a `200`
+(verified live 2026-08-10). Nothing rejects it and nothing resolves it, so the caller hears the raw
+token. Treat it as your rule to keep, not the server's.
+
+Survives deploy and revert-to-draft unchanged. It does **not** appear in the `/aiworker/run` text
+system prompt — it is a session-start field for the delivered voice/chat channel, so verify it there
+(the resolved voice context exposes it as `greeting_instructions`; see
+`commotion-debug/references/call-analyzer-api.md`).
 
 ### ⚠ The agent's primary model: top-level `modelConfigurationRequestList` — EVERY agent, EVERY channel
 
@@ -198,6 +222,17 @@ Note the deliberate asymmetry with the worker: at **worker** level the model *is
 (`workerAdvancedSettingsRequest.workerLanguageModelSettingsRequest.workerLanguageModelConfigurationRequest`,
 which does round-trip). Agent ≠ worker here. Get `id`/`modelCode`/`providerCode` from `GET /aimodel`, and
 keep the provider **`commotion`** (see `aiworker-lifecycle.md`, "Providers and credentials").
+
+**⚠ `advancedSettingsRequest` is rejected outright for `VOICE_AGENT` (verified live 2026-08-10):**
+`400 "Agent update failed: Advanced settings is not supported for VOICE_AGENT type."` The block is
+chat/structured-output only. Two consequences: a voice agent takes its token/temperature/fallback
+settings from the **worker**, and the `acwMetadataRequest` that `AdvancedSettingsRequest` advertises is
+**unreachable on a voice agent** — wire ACW at worker level instead (`aiworker-lifecycle.md`).
+
+**⚠ `temperature` is required whenever you do send the block (verified live 2026-08-10):** omitting it
+→ `400 "languageModelSettingsRequest.temperature is required."`, even though the schema does not list
+it under `required`. Send `maximumOutputTokens`, `temperature`, `numberOfRetries` and
+`reasoningEffortEnabled` together.
 
 ### Auto-provisioned agents get the platform default — they do NOT inherit the worker's model
 

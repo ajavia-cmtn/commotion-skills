@@ -9,9 +9,9 @@ description: >-
   to a human for no reason, why", "the bot hallucinated a policy number on this call, fix it", "debug
   why calls are dropping on my renewal worker", "RCA this call". This is **not** part of the build-time
   quality loop — it starts from production traffic rather than from a test set, so prefer it over
-  commotion-improve-worker whenever the input is a real call id. Calls the dev3 backend and Call
+  commotion-improve-worker whenever the input is a real call id. Calls the Commotion backend and Call
   Analyzer through the thin Commotion MCP server (OAuth — no API key in the transcript).
-allowed-tools: Read, AskUserQuestion, Skill, mcp__commotion__commotion_request, mcp__commotion__commotion_schema, mcp__commotion__commotion_analyzer
+allowed-tools: Read, AskUserQuestion, Skill, mcp__commotion-dev3__commotion_request, mcp__commotion-tcuat__commotion_request, mcp__commotion-tcprod__commotion_request, mcp__commotion-dev3__commotion_schema, mcp__commotion-tcuat__commotion_schema, mcp__commotion-tcprod__commotion_schema, mcp__commotion-dev3__commotion_analyzer, mcp__commotion-tcuat__commotion_analyzer, mcp__commotion-tcprod__commotion_analyzer
 ---
 
 # Commotion: Debug a Production Issue (RCA → repro → fix)
@@ -40,6 +40,36 @@ defect      Analyzer     + class       first                   ≥3 of 4     dep
                               └──────── loop while below the gate ─┘  (max 3 rounds)
 ```
 
+## Pick the environment before the first tool call
+
+Commotion runs in several environments — dev3, tcuat, tcprod — and **each one has its own connector
+exposing its own copy of these tools**. They are separate backends holding different data, and one of
+them is **production**. Picking the wrong one is the most damaging mistake available in this skill,
+and nothing downstream will catch it: the guarantee is this instruction, not an enforcement.
+
+**Read the environment off the tool name.** Tools are namespaced by the connector they came from, and
+the environment appears in that name — `dev3`, `tcuat`/`UAT`, `tcprod`/`Prod`. The exact shape depends
+on where you are running: a plugin-declared server name in Claude Code
+(`mcp__commotion-tcuat__commotion_request`), or the administrator's connector name in the Claude
+desktop app (`mcp__claude_ai_Commotion_Agent_UAT__commotion_request`). **Match on the environment
+word, not on a fixed prefix**, and never assume a default — least of all dev3.
+
+1. **The user's words win.** If they name an environment, use the connector whose name identifies it.
+2. **Exactly one connector available → use it**, no question needed.
+3. **Several available and the user hasn't said → ask once**, listing the environments you can see.
+   Then use that one connector for **every** call for the rest of the task. Never mix connectors
+   within a task.
+4. **If no tool name clearly identifies an environment, ask rather than guess.** Name the connectors
+   you can see and let the user choose.
+5. **State which environment you are working in** in your first substantive reply — and again,
+   plainly, before the first write to a production connector.
+6. **Never retry a failed call on a different connector.** A `401`/unauthenticated error means that
+   connector has not been authorized — tell the user to connect it in their client's connector
+   settings. It never means "try another environment".
+
+Where this file names `commotion_request`, `commotion_schema` or `commotion_analyzer` without a
+prefix, it means that tool **on the connector you selected here**.
+
 ## When to use this
 
 The user has a real call or chat session that went wrong. You need its id — a `callId`
@@ -67,10 +97,10 @@ hand off to `commotion-improve-worker` (see **Escalation**).
 
 ## How this skill talks to the platform (read first)
 
-**Two planes, three tools.** The worker lives on the dev3 BE REST plane; the evidence lives on the Call
+**Two planes, three tools.** The worker lives on the BE REST plane; the evidence lives on the Call
 Analyzer plane. Both go through the connected **Commotion MCP** server:
 
-- **`commotion_request`** — one authenticated call to the dev3 backend: `{ "method": "GET|POST|PUT|
+- **`commotion_request`** — one authenticated call to the Commotion backend: `{ "method": "GET|POST|PUT|
   DELETE", "path": "/…", "body": <JSON, for writes> }` → `{ "status", "body" }` (a non-2xx is
   **returned, not thrown** — read it and adjust). Pass a **path**; the base URL is fixed server-side.
 - **`commotion_schema`** — a bundled request schema: `{ "schema_name": "RunScenariosRequest" }`.
@@ -80,6 +110,14 @@ Analyzer plane. Both go through the connected **Commotion MCP** server:
   too large. It is read-only by construction — there is no `method` argument, so nothing here can
   change production. **A truncated body is incomplete evidence**: re-query narrower (fewer `fields=`
   sections, a shorter log window, a line filter) rather than concluding from what survived.
+
+**If `commotion_analyzer` is not in your tool list, stop and say so.** The Call Analyzer plane is
+opt-in per environment: the MCP server only registers this tool when it has been given that
+environment's api key, so on an environment where the plane is not (yet) configured the tool is simply
+absent. That makes RCA from a real call impossible — there is no evidence to read. Tell the user
+plainly that Call Analyzer is not available on the environment they are connected to, and offer
+commotion-improve-worker (which works from a test set rather than production traffic) instead. Do
+**not** attempt to reconstruct a call from BE REST data and present it as RCA.
 
 **Read ids/fields from results, not `jq`:** both tools return the parsed `body` — read the value you
 need straight off it (a worker's live `version` is `body.version`; a call's worker is
