@@ -112,6 +112,66 @@ worker (it's rejected). Inspect the exact fallback field names with `commotion_s
 sub-blocks default. The full provider→model→language map lives in
 `GET /aiworker/metadata` → `voiceConfig.voicePipelineTypeConfig`.
 
+## Interruption config — two mutually exclusive modes (verified live 2026-08-12, dev3 + tcuat)
+
+Interruption behaviour lives under the speaking plan, alongside VAD, noise cancellation and
+turn-taking: `workerVoiceSettingsRequest.speakingPlanRequest.interruptionConfig`
+(`InterruptionConfigRequest`; `enabled` + `disableOnFirstMessage` are required when you send the block).
+
+It carries **two different ways to decide whether user speech is a real interruption, and you may
+enable only one**:
+
+| Mode | Flag | Its fields |
+|---|---|---|
+| Word settings — deterministic word-count threshold | `interruptionWordSettingsEnabled` | `numberOfWords`, `interruptionIgnoreTerms` |
+| Prediction — model score decides | `interruptionPrediction.enabled` | `interruptionPrediction.probabilityThreshold` |
+
+**Both flags true → `400`, on create and on update:** *"Interruption Word Settings and Interruption
+Prediction can't be enabled at the same time. Turn one off to enable the other."* The check is
+unconditional — it fires even when the parent `interruptionConfig.enabled` is `false`, so you cannot
+stage the combination behind a disabled parent.
+
+**The trap: clearing the flag is not enough — clear the fields too.** The backend validates only the
+two booleans, not the config they gate. A payload with `interruptionWordSettingsEnabled: false` that
+still carries `numberOfWords` / `interruptionIgnoreTerms` alongside `interruptionPrediction.enabled:
+true` returns **200 and persists both blocks intact**. The worker then opens in the UI with the
+keyword list *and* the probability threshold both populated, and the UI refuses to save anything
+until a human turns one off — a worker you wrote but can no longer edit there. So when you switch
+modes, **send the losing mode's fields empty**:
+
+```jsonc
+// GOOD — prediction mode; word-settings fields cleared
+"interruptionConfig": {
+  "enabled": true, "disableOnFirstMessage": true,
+  "interruptionWordSettingsEnabled": false,
+  "numberOfWords": 0, "interruptionIgnoreTerms": [],
+  "interruptionPrediction": { "enabled": true, "probabilityThreshold": 0.5 },
+  "duckingEnabled": true
+}
+
+// GOOD — word-settings mode; prediction cleared
+"interruptionConfig": {
+  "enabled": true, "disableOnFirstMessage": true,
+  "interruptionWordSettingsEnabled": true,
+  "numberOfWords": 2, "interruptionIgnoreTerms": ["got it", "i see", "uh huh"],
+  "interruptionPrediction": { "enabled": false }
+}
+
+// BAD — 200, but leaves a worker the UI cannot save
+"interruptionWordSettingsEnabled": false,
+"numberOfWords": 2, "interruptionIgnoreTerms": ["got it", "i see"],
+"interruptionPrediction": { "enabled": true, "probabilityThreshold": 0.5 }
+```
+
+Because **`PUT /aiworker/{id}` replaces** (see "The edges"), resend `interruptionConfig` whole on
+every update — a partial block silently resets the fields you left out (`numberOfWords` drops to `0`).
+
+**Which mode to choose:** prefer **prediction** when the caller backchannels a lot ("mm-hmm", "right")
+and you can't enumerate the terms — it scores each interruption 0–1 instead of reacting to every
+detected word, and it's the mode `duckingEnabled` composes with (sub-threshold speech lowers bot
+volume rather than being ignored). Prefer **word settings** when you need deterministic, auditable
+behaviour over a known filler vocabulary.
+
 ## The first message — worker-level `greetingInstructions`
 
 A top-level string on `AiWorkerRequest` (agents carry their own; see `agents-and-orchestration.md` for
