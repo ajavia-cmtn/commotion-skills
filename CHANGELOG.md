@@ -1,5 +1,47 @@
 # Changelog
 
+## 2026-08-12 — 2.0.1 — Interruption config: two mutually exclusive modes, and the orphan-block trap
+
+Triaging a bug ticket ("with connector we are able to configure Interruption Word Settings and
+Interruption Prediction together when it's restricted to do so") turned up a gap in these skills: the
+**speaking plan was undocumented entirely**, so nothing told an agent that interruption has two modes
+and that only one may be enabled. Verified live against dev3 **and** tcuat on 2026-08-12:
+
+- **The backend does enforce the mutex.** Both flags true → `400` on `POST /aiworker` *and*
+  `PUT /aiworker/{id}`, with the same message the UI toasts: *"Interruption Word Settings and
+  Interruption Prediction can't be enabled at the same time."* The check is unconditional — it fires
+  even behind `interruptionConfig.enabled: false`, so the combination can't be staged. `PUT` is a true
+  replace (no merge escape), and `AiAgentRequest` carries no interruption config, so worker
+  create/update is the only write path. The ticket as written does not reproduce.
+- **What does get through is an orphaned word-settings block.** Validation guards only the two
+  booleans, not the config they gate: `interruptionWordSettingsEnabled: false` while still sending
+  `numberOfWords` + `interruptionIgnoreTerms`, alongside `interruptionPrediction.enabled: true`,
+  returns **200 and persists both blocks**. The worker then opens with the keyword list *and* the
+  probability threshold populated, and the UI refuses to save until a human turns one off — a worker
+  the connector wrote but can no longer edit there. That is the reported symptom.
+
+What changed in the skills:
+
+- **`aiworker-lifecycle.md` gained "Interruption config — two mutually exclusive modes"** — the
+  `speakingPlanRequest.interruptionConfig` path, a mode/flag/fields table, the 400, and the rule that
+  matters: **switching modes means clearing the losing mode's fields, not just its flag.** Verified
+  GOOD payloads for both modes (each round-tripped live; an empty `interruptionIgnoreTerms` normalizes
+  to `null` and `interruptionPrediction: {enabled: false}` normalizes to `null`, so neither leaves
+  residue), plus which mode to prefer and how `duckingEnabled` composes with prediction.
+- **`commotion-improve-worker`'s failure→fix taxonomy** row for *"talked over the caller / long
+  silences"* now points at that section instead of `control-and-reliability.md`, which has no
+  barge-in/VAD content at all — the loop was being sent to the wrong file for exactly the fix that
+  produces this state.
+
+**Not fixed here, and it can't be:** this stops *these skills* from writing the state; it does not
+close the hole. Any other client of the API can still persist it, and existing workers already in that
+state are untouched. The durable fix is server-side normalization — when
+`interruptionWordSettingsEnabled` is false, clear `numberOfWords`/`interruptionIgnoreTerms` on write,
+or reject the payload when they're non-empty and prediction is enabled. Two questions remain open for
+the BE/FE owners: whether the voice pipeline honours the `false` flag when ignore terms are present
+(if not, both features are live on real calls — the exact restricted combination), and whether the UI
+derives each section's toggle from data presence rather than the boolean.
+
 ## 2026-08-10 — 2.0.0 — Skills, the first message, and ACW: three backend features the skills could not reach
 
 The backend shipped three capabilities the plugin had **no** coverage of. A grep proved the gap:
