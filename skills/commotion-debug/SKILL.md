@@ -26,9 +26,10 @@ alone is a guess; a fix chosen against a simulation that fails the same way is a
 
 **Auth is automatic (browser login).** The Commotion MCP handles auth via OAuth: on first use it opens
 a Commotion login in the browser, then attaches the user's token to every `commotion_request` /
-`commotion_schema` call for you — the token never enters the conversation. `commotion_analyzer` needs no
-token at all (its plane is authenticated server-side). Never ask the user for an email/password or a
-token, and don't pass a `token` argument. If the tools aren't available at all, the MCP isn't connected
+`commotion_schema` call for you — the token never enters the conversation. `commotion_analyzer` uses that
+**same** forwarded token, and Call Analyzer resolves your role from it (per-user access — a user without a
+`callAnalyzer` grant gets `403`). Never ask the user for an email/password or a token, and don't pass a
+`token` argument. If the tools aren't available at all, the MCP isn't connected
 — ask the user to add/authorize it via `/mcp`.
 
 ```
@@ -83,9 +84,11 @@ hand off to `commotion-improve-worker` (see **Escalation**).
 
 ## Prerequisites (verified live)
 
-- **The Call Analyzer plane must be connected.** If `commotion_analyzer` isn't in your tools, the MCP
-  server has no Call Analyzer api key configured — say so and stop; there is no fallback source for
-  this evidence.
+- **The Call Analyzer plane must be connected _and_ your user must have access.** If
+  `commotion_analyzer` isn't in your tools, the environment isn't in authenticated mode — say so and
+  stop; there is no fallback source for this evidence. If the tool **is** present but calls return
+  `{ "status": 403 }`, your connected user has no `callAnalyzer` grant (see the permission-denied
+  branch below) — also a stop.
 - **Reproduction needs a deployed worker — but not a voice one.** The must-fail/must-pass gates close on
   a **simulation**, and simulations run on **voice, chat and structured-output** workers alike
   (`POST /simulation/run`, channel set per scenario via `aiAgentChannelType` — `CHAT` for chat *and* SO;
@@ -111,13 +114,20 @@ Analyzer plane. Both go through the connected **Commotion MCP** server:
   change production. **A truncated body is incomplete evidence**: re-query narrower (fewer `fields=`
   sections, a shorter log window, a line filter) rather than concluding from what survived.
 
-**If `commotion_analyzer` is not in your tool list, stop and say so.** The Call Analyzer plane is
-opt-in per environment: the MCP server only registers this tool when it has been given that
-environment's api key, so on an environment where the plane is not (yet) configured the tool is simply
-absent. That makes RCA from a real call impossible — there is no evidence to read. Tell the user
-plainly that Call Analyzer is not available on the environment they are connected to, and offer
-commotion-improve-worker (which works from a test set rather than production traffic) instead. Do
-**not** attempt to reconstruct a call from BE REST data and present it as RCA.
+**If `commotion_analyzer` is not in your tool list, stop and say so.** The MCP server only registers
+this tool in authenticated mode, so on an environment without it the plane is simply absent. That
+makes RCA from a real call impossible — there is no evidence to read. Tell the user plainly that Call
+Analyzer is not available on the environment they are connected to, and offer commotion-improve-worker
+(which works from a test set rather than production traffic) instead. Do **not** attempt to
+reconstruct a call from BE REST data and present it as RCA.
+
+**If the tool is present but a call returns `{ "status": 403 }`, stop — this is permission-denied,
+not a missing call.** Access is per-user now: the connected user has no `callAnalyzer` grant. Do not
+retry, and do not fall back to reconstructing the call from BE REST. Tell the user their account
+lacks Call Analyzer access and that an admin can grant it (role `reader`/`analyst`/`admin`), then
+offer commotion-improve-worker as the production-traffic-free alternative. (A `403` on *some*
+endpoints but not others means your role is `reader`/`analyst` — you can still RCA from what you can
+read; only escalate to a stop when the core `/api/call/<id>` read itself `403`s.)
 
 **Read ids/fields from results, not `jq`:** both tools return the parsed `body` — read the value you
 need straight off it (a worker's live `version` is `body.version`; a call's worker is

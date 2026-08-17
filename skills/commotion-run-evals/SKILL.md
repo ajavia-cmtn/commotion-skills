@@ -157,8 +157,9 @@ is the **same transport as `commotion-create-worker`**:
   real call with a robot caller**, so every scenario-run has a full transcript, per-turn latency, tool
   calls with their results, and audio metrics waiting here — far richer than `evaluationReasoning` alone.
   Use it in Phase 3 to confirm the runs really happened and in Phase 4 to explain *why* they failed.
-  ⚠ **Optional**: the MCP registers it only where the Call Analyzer key is configured. If it's absent,
-  say so once and fall back to `evaluationReasoning` — never block a run on it.
+  ⚠ **Optional**: the MCP registers it only in authenticated mode, and even then the connected user
+  may lack access (`{ "status": 403 }`) or see a role-reduced view. On any of those — absent, `403`,
+  or masked/partial — say so once and fall back to `evaluationReasoning`; never block a run on it.
 
 **Auth is automatic — there is no key.** The MCP client owns OAuth: the first time the
 Commotion MCP is used it opens a Commotion login in the browser, then attaches the user's token to

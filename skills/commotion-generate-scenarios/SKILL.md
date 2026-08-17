@@ -259,6 +259,9 @@ ways to create them — pick per goal, usually (a) for breadth + (b) for the pre
   Pick the calls whose `stopReason` or transcript shows the behaviour you want to pin, read
   `?fields=transcript` to get the caller's turns, and **copy them verbatim** — STT artifacts and garbled
   words are frequently the trigger, so tidying them up produces a scenario that can't reproduce anything.
+  ⚠ **Optional** — if `commotion_analyzer` is absent, returns `{ "status": 403 }` (no Call Analyzer
+  access), or only a role-reduced view, say so once and author scenarios from the eval results /
+  imagination instead; never block on it.
   Endpoint map: `commotion-debug/references/call-analyzer-api.md`. (`conversationId` is a BE-side id, not
   the Call Analyzer `callId` — bridge via `GET /conversation/worker-conversations?workerId=` matched on
   `voiceInteractionId`; if that doesn't resolve, author the scenario manually via (b) from the transcript.)

@@ -105,8 +105,9 @@ server (two tools, no scripts, no keys), one unified backend:
 - **`commotion_analyzer`** — one **GET** against the **Call Analyzer** plane: `{ "path": "/api/…" }` →
   the same `{ "status", "body" }` shape. Your diagnosis quality is capped by your evidence, and
   `evaluationReasoning` is the evaluator's *opinion* of a call; this is the call. Several rows of the
-  taxonomy below are only **provable** here. ⚠ **Optional** — registered only where the Call Analyzer key
-  is configured; if absent, say so once and diagnose from `evaluationReasoning` alone.
+  taxonomy below are only **provable** here. ⚠ **Optional** — registered only in authenticated mode, and
+  the connected user may lack access (`{ "status": 403 }`) or see a role-reduced view; on absent, `403`,
+  or masked/partial data, say so once and diagnose from `evaluationReasoning` alone.
 
 **Auth is automatic — there is no key.** The MCP client owns OAuth: the first time the
 Commotion MCP is used it opens a Commotion login in the browser, then attaches the user's token to

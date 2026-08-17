@@ -688,7 +688,8 @@ and it is invisible in the reply text but obvious here. Endpoint map:
 `commotion-debug/references/call-analyzer-api.md`. (For a **voice** worker use the voice surface instead:
 `/api/calls?workerId=<worker-id>` then `/api/call/<id>?fields=transcript,metrics` — and query both the
 bare `<worker-id>` and `<worker-id>_<version>` forms.) ⚠ `commotion_analyzer` is optional — skip this if
-it isn't connected.
+it isn't connected, if it returns `{ "status": 403 }` (your user has no Call Analyzer access), or if
+your role only returns a partial view.
 Editing the live worker means revert-to-draft → edit the agent at the new draft version → redeploy
 (see `references/aiworker-lifecycle.md`).
 
