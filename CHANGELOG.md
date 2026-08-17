@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-08-16 — 2.0.2 — Call Analyzer is now per-user RBAC (token-based), not blanket-admin
+
+The Call Analyzer plane moved from a server-side global api key (blanket admin, cross-workspace) to
+per-user, token-based RBAC enforced in Call Analyzer. Skills docs updated to match: the endpoint-map
+contract ([`commotion-debug/references/call-analyzer-api.md`](skills/commotion-debug/references/call-analyzer-api.md))
+replaces its "No token / admin-scoped" claims with token-based, per-user, **role-scoped** semantics
+(admin sees all; analyst/reader get reduced/redacted/workspace-scoped data), and documents a **`403`
+= no Call Analyzer access** response. `commotion-debug` gains a permission-denied (403) stop branch
+distinct from tool-absence; the loop skills (`run-evals`, `improve-worker`, `generate-scenarios`,
+`create-worker`) now treat a `403` or role-reduced view the same as tool-absence — say so once and
+fall back to `evaluationReasoning`, never block. Docs only; no tool contract change.
+
 ## 2026-08-12 — 2.0.1 — Interruption config: two mutually exclusive modes, and the orphan-block trap
 
 Triaging a bug ticket ("with connector we are able to configure Interruption Word Settings and

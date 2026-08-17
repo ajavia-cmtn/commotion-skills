@@ -17,9 +17,11 @@ production traffic, and several rows of `commotion-improve-worker`'s failure→f
 *provable* from this plane.
 
 ⚠ **Outside `commotion-debug`, treat it as optional enrichment.** The MCP server registers
-`commotion_analyzer` only where the Call Analyzer api key is configured, so it may be absent. In the loop
-skills: if the tool isn't available, say so once and fall back to `evaluationReasoning` — never block a
-run on it. In `commotion-debug` it is essential and its absence is a stop condition.
+`commotion_analyzer` only in authenticated mode, so it may be absent; and even when present, the
+connected user may lack access (`{ "status": 403 }`) or see a role-reduced view. In the loop skills,
+treat **all three** — tool absent, `403`, or masked/partial data — the same way: say so once and fall
+back to `evaluationReasoning`, never block a run on it. In `commotion-debug` it is essential: tool
+absence, or a `403` on the core call read, is a stop condition.
 
 This is a **second plane**, separate from the dev3 BE REST plane. Call Analyzer holds what happened; it
 does **not** hold the worker — every change goes through `commotion_request` on the BE plane.
@@ -36,7 +38,15 @@ thrown** — read the status and adjust.
 
 - **Read-only by construction.** There is no `method` argument; nothing here can change production.
   (The gateway also rejects non-GET verbs with `404`.)
-- **No token.** This plane is authenticated server-side. Never pass one, and never ask the user for one.
+- **Token-based, per-user RBAC.** The MCP forwards your connected user's token; Call Analyzer resolves
+  your role from it. You never pass or ask for a token. Two consequences to handle:
+  - **`403` = no Call Analyzer access.** If a call returns `{ "status": 403 }`, the connected user has
+    no `callAnalyzer` grant. Stop and say so (see the permission-denied branch in `SKILL.md`); do not
+    retry or treat it as a missing call.
+  - **Data is role-scoped.** `admin` sees everything cross-workspace; `analyst`/`reader` get a
+    reduced/redacted view (some fields masked, some endpoints `403`). A smaller-than-expected payload
+    may be your role, not missing data — this is distinct from `truncated`, and re-querying narrower
+    will not recover fields your role can't see.
 - **Pass a path, not a URL** — the base URL is fixed server-side. Query strings are allowed.
 - **`truncated` means incomplete evidence.** Re-query narrower (fewer `fields=` sections, a shorter log
   window, a line filter) rather than reasoning from the fragment that survived. `dropped` names exactly
@@ -381,6 +391,9 @@ Call Analyzer UI.
   the answer was not grounded in the skill — fix the skill's `description`, not its body.
 - **`transcription[]` contains `state_snapshot` rows**, not just `user`/`assistant` turns — they record
   state-variable changes mid-call and are useful, but don't count them as conversation turns.
-- **The plane is admin-scoped.** It returns unmasked transcripts and internal detail across every
-  workspace, so treat what you fetch as sensitive: quote only what the RCA needs, and never echo a whole
-  transcript of a call the user didn't ask about.
+- **Access is role-scoped to the connected user** (not blanket-admin). An `admin` sees unmasked
+  transcripts and internal detail across every workspace; `analyst`/`reader` see a reduced, redacted,
+  and workspace-scoped view. Regardless of role, treat what you fetch as sensitive: quote only what the
+  RCA needs, and never echo a whole transcript of a call the user didn't ask about. If your reads come
+  back masked/partial or an endpoint `403`s, that is your role — say so rather than guessing at the
+  hidden content.
