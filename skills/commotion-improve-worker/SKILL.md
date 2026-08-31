@@ -10,7 +10,7 @@ description: >-
   This is step 4 of the quality loop (create-worker → generate-scenarios → run-evals →
   **improve-worker**) and owns the loop. Calls the Commotion backend through the thin Commotion MCP server
   (OAuth — no API key in the transcript).
-allowed-tools: Read, AskUserQuestion, mcp__commotion-dev3__commotion_request, mcp__commotion-tcuat__commotion_request, mcp__commotion-tcprod__commotion_request, mcp__commotion-dev3__commotion_schema, mcp__commotion-tcuat__commotion_schema, mcp__commotion-tcprod__commotion_schema, mcp__commotion-dev3__commotion_analyzer, mcp__commotion-tcuat__commotion_analyzer, mcp__commotion-tcprod__commotion_analyzer
+allowed-tools: Read, Write, Edit, Bash, AskUserQuestion, mcp__commotion-dev3__commotion_request, mcp__commotion-tcuat__commotion_request, mcp__commotion-tcprod__commotion_request, mcp__commotion-dev3__commotion_schema, mcp__commotion-tcuat__commotion_schema, mcp__commotion-tcprod__commotion_schema, mcp__commotion-dev3__commotion_analyzer, mcp__commotion-tcuat__commotion_analyzer, mcp__commotion-tcprod__commotion_analyzer
 ---
 
 # Commotion: Improve a Worker (the quality loop)
@@ -102,6 +102,28 @@ server (two tools, no scripts, no keys), one unified backend:
 - **`commotion_schema`** — a bundled request schema: `{ "schema_name": "AiWorkerRequest" }` → the JSON
   Schema with its `$defs`. Any component name in the live spec works. **Never invent a field that isn't
   in the schema.**
+
+**Three rules, all absolute:**
+
+- **Never discover a shape by writing.** `commotion_schema` (plus `GET`s) is how you learn a body.
+  A `POST`/`PUT` carrying placeholder text to "see what sticks" is not a probe — `PUT` is a **full
+  replace**, so it overwrites the real record with your placeholder. If you must try a write shape,
+  create a throwaway `ZZ-TEST-…` worker, probe there, and delete it.
+- **A client-side denial is not an API error.** *"Permission for this action was denied"* /
+  *"Blocked by classifier"* / a permission prompt comes from the **client**, not the backend. Never
+  retry it, never switch connectors, never re-route it through `Bash`/`curl`, and **never hand the user
+  a script plus a token to run the call themselves** — that leaks the credential the MCP exists to hold,
+  skips the audit log, and is built on a base URL you had to guess. Staging the *content* in a file is
+  fine; the write still goes through `commotion_request` on approval. Re-read your body (the denial is
+  usually right), then tell the user plainly what was blocked and move on to the unblocked work.
+- **Never claim "the API doesn't expose that" from a path you guessed, and never answer a question
+  about one environment with another environment's data.** Tools and knowledge hang off the **worker**
+  (`GET /ai-worker-tool?aiWorkerId=&version=`, `GET /aiworker/knowledge?aiWorkerId=`), never off the
+  agent. Check the endpoint map and the live spec, then state what you checked. If a read is
+  unavailable in the selected environment, say it is unavailable — don't substitute dev3 for tcuat.
+
+*(Full detail: `references/api-and-auth.md` in **commotion-create-worker**.)*
+
 - **`commotion_analyzer`** — one **GET** against the **Call Analyzer** plane: `{ "path": "/api/…" }` →
   the same `{ "status", "body" }` shape. Your diagnosis quality is capped by your evidence, and
   `evaluationReasoning` is the evaluator's *opinion* of a call; this is the call. Several rows of the
@@ -232,6 +254,14 @@ Apply the diagnosed fixes using the **create-worker machinery** (don't reinvent 
   description, `agentType`, model config, triggers, or they reset). The prompt renders/edits in the UI
   and the **`aiAgentId` is unchanged, so your scenarios keep working** — verified live 2026-08-07. This
   replaces the old delete-and-re-POST rule; see agents-and-orchestration.md.
+  > ⚠ **This is a full replace, so improving a large prompt rewrites all of it.** If the existing
+  > `instructions` exceed ~8 000 characters, follow `commotion-create-worker`'s
+  > `references/large-prompts.md`: `GET` the agent → `Write` the current prompt to a file → make your
+  > fix with a surgical `Edit` on that file → `PUT` from the file → **`GET` it back and verify**
+  > (section anchors present and in order, first/last line intact, length within ~1 % of the file)
+  > before you run the next eval. A silently truncated prompt reads as a *behaviour regression* in the
+  > next eval round, and you will spend the loop chasing a defect you introduced. **Only the lines you
+  > diagnosed may change** — never rewrite, reflow or condense the rest.
 - **Tools** → create on the draft (`POST /ai-worker-tool/...`) and reference by action name in the
   prompt — see tools-and-capabilities.md.
 - **Knowledge** → attach + index, bind in the prompt — see knowledge-and-rag.md.

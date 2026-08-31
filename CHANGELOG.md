@@ -1,5 +1,140 @@
 # Changelog
 
+## 2026-08-31 — 2.0.3 — Four QA/review reports: a blocked write, a half-built A2A setup, 60k-character prompts, and a bypass
+
+Three reports from QA and review after using the MCP + skills, plus a fourth that arrived while fixing
+them and turned out to be the first and third colliding. All re-probed live against dev3 (throwaway
+workers `ZZ-AARYA-A2A-SERVER` / `ZZ-AARYA-A2A-CLIENT`, created and deleted). Most is now fixed in the
+skills; two residues can only be closed by the backend and the MCP server respectively, and both are
+written down rather than glossed.
+
+### 1. "Permission for this action was denied by the Claude Code auto mode classifier" — the classifier was right
+
+The reported payload was `PUT /aiagent/6a7b…` on **TCPL Field Saathi Two Way** carrying
+`"instructions": "SHAPE PROBE - do not deploy"`. That string appears nowhere in this repo — the model
+invented a *shape probe*: a write sent to discover what the body should look like. `PUT /aiagent/{id}`
+is a **full replace**, so had it run it would have replaced a real worker's prompt with the words
+`SHAPE PROBE - do not deploy`. The block came from Claude Code, not from Commotion; the backend never
+saw the call; and it prevented a destructive write. The defect is that the skills allowed the model to
+get there at all.
+
+- **`api-and-auth.md` gained "Never discover a shape by writing".** `commotion_schema` (plus `GET`s)
+  is the only shape source, in a fixed order (schema → metadata/`GET` a real record → ask the user).
+  If a write shape genuinely has to be tried, it happens on a throwaway `ZZ-TEST-…` worker that gets
+  deleted. Corollary: no filler values — `"TBD"`, `"placeholder"`, `""` are all data to the backend.
+- **`api-and-auth.md` gained "When a call is refused by the client, not by the backend".** A table
+  separating a backend `4xx/5xx` (read it, adjust, retry) from a client-side denial (do **not** retry,
+  do **not** switch connectors, and above all do **not** re-route the same call through `Bash`/`curl`
+  — re-read your own body, then tell the user in one sentence and continue with the unblocked work).
+- Both rules are restated inline in all five skills, next to the `commotion_schema` bullet, so they
+  are in context before the first write rather than one reference-file hop away.
+- **README gained a "Permissions" section**: what the message means, why the reported instance was a
+  correct block, and the `.claude/settings.json` `permissions.allow` rules that stop the interruptions
+  — allow the read-only tools (`commotion_schema`, `commotion_analyzer`) everywhere, allow
+  `commotion_request` on dev3 if you like, and **leave `commotion-tcprod` writes prompting**.
+
+### 2. "Claude connector did not enable MCP config in server worker" (A2A) — half our doc was stale, the other half is a real API gap
+
+An A2A setup has two sides and they are not symmetric. The reference claimed **both** were impossible.
+Re-probed live: one is now fully available and one is genuinely closed.
+
+- **Client side — the doc was wrong.** `POST /ai-worker-tool/a2a-agent` and
+  `PUT /ai-worker-tool/a2a-agent/{aiWorkerToolId}` exist and work (`CreateA2aAgentToolRequest` /
+  `A2AAgentMetaDataInput`). A create with `agentName` + `agentDescription` + `agentEndpointUrl` and
+  **no credential** returns `200` (unlike connectors, `credentialId` really is optional), and the
+  backend returns a slugged `a2aAgentName` (`fx-desk-1299`) that binds as **`[tool:fx-desk-1299]`** in
+  the calling agent's `instructions` — round-tripped intact. The old note *"there is no
+  `ai-worker-tool` path to bind a remote agent"* is deleted; the endpoint is in the tools table and the
+  A2A section now carries the full recipe. **Because the skill said it was impossible, Claude would not
+  attempt the one step QA reported missing.**
+- **Server side — a real gap, unchanged.** `POST /a2a/{workerId}` on a worker that has not been
+  enabled as an A2A server returns **HTTP 200** with JSON-RPC `"Worker is not enabled as A2A server"`.
+  **Deploying is not the toggle**: a fresh worker with an enabled agent, deployed to `LIVE`, still
+  returned that error. There is no `a2aServerEnabled` anywhere in the spec — not on `AiWorkerRequest`,
+  not on `AiAgentRequest`, not on `AiAgentTriggerInput` (`CHANNELS|WEBHOOKS|EVENTS` × `VOICE|CHAT`
+  only) — and an A/B against a worker that *is* enabled showed the two records differ in nothing the
+  API exposes. Also verified: `GET /.well-known/agent.json/{id}` returns `200` for **any** worker,
+  enabled or not, **so the agent card is not proof the server side works**.
+- **The behaviour change that matters:** the skill now ends every A2A setup with a **verification
+  gate** — probe `POST /a2a/{target}` and, on `"Worker is not enabled as A2A server"`, say so
+  explicitly, name the worker, and tell the user it is a manual UI/admin step. Attaching the client
+  tool and reporting success is what produced a setup that looked complete and failed at runtime.
+- **Open for BE:** expose the A2A-server enable on `AiWorkerRequest` (or as
+  `POST /aiworker/{id}/a2a-server`). Until then no API client can build a working A2A setup unaided.
+
+### 3. "Claude skills fail miserably on big prompts 60k+ characters" — the backend is innocent
+
+Measured: a single `PUT /aiagent/{id}` with a **128 032-character** `instructions` field returned
+`200` and echoed back **128 032 characters**, byte-identical, 800 numbered rules intact. There is no
+size cap and no server-side truncation. The loss is entirely in the model emitting the prompt as a
+JSON string argument — ~15–20 k output tokens in one span for a 60 k prompt — and `PUT` being a full
+replace means a **one-line edit re-emits the whole field**, which is where a customer's prompt quietly
+becomes a shorter paraphrase.
+
+New reference **`commotion-create-worker/references/large-prompts.md`**, wired into `create-worker`
+Phase 6, `improve-worker`'s prompt-fix step and `commotion-debug`'s fix step:
+
+- **A size gate** — under 8 k inline as before; 8–20 k file-based + verified; over 20 k, raise
+  decomposition into **Worker Skills** (`skills-and-progressive-disclosure.md`) with the user first,
+  since a 60 k monolith is also a worse worker (every token in every turn's context).
+- **File-as-source-of-truth** — the prompt is `Write`n to a working file and every later change is a
+  surgical `Edit` on that file, never a rewrite from memory; sending it is then transcription from a
+  file just read, not reconstruction across a long conversation. Editing an existing large prompt is
+  `GET` → `Write` to file → `Edit` → `PUT`, never `GET` → think → `PUT`. `create-worker` and
+  `improve-worker` gained `Write`/`Edit` (and `improve-worker` `Bash`) in `allowed-tools` to make this
+  possible at all.
+- **Numbered `## Snn` section anchors** — two lines of cost that turn "did anything get lost?" into a
+  countable check.
+- **A mandatory read-back gate above 8 k** — a `200` is not evidence, because the backend echoes what
+  you emitted, drift included. `GET` the agent and verify: every anchor present, once, in order;
+  first/last line exact; length within ~1 % of the file's `wc -c`. On mismatch: stop, re-send from the
+  file, and if it drifts again **tell the user which sections were lost**. Never deploy past a failed
+  gate.
+- **Hard rules**: never paraphrase, compress or reflow a prompt the user supplied; never write a
+  prompt you could not reproduce in full (a partial write to a full-replace field is a deletion);
+  never re-derive a prompt from a summary of itself.
+
+**Not fixed here, and it can't be from this repo.** The structural fix is transport-side: a
+`commotion_text_patch { path, field, edits:[{old_string, new_string}] }` tool in `commotion-mcp` that
+does the read-modify-write **server-side** and returns the resulting length + checksum. Then a one-line
+change to a 60 k prompt costs the two lines that changed, and verification is a hash comparison instead
+of an eyeball. The file + anchors + read-back gate is the best guarantee available until that ships,
+and the reference says so plainly.
+
+### 4. A second, independent report the same day — and two behaviours it exposed that the three above didn't
+
+A different team member hit a blocked `PUT /aiagent/{agentId}` on **tcuat** while patching a
+**74 000-character** prompt. Root cause is reports 1 + 3 colliding, and it corroborates both diagnoses
+unaided (*"There's no PATCH (full body only), so applying it means re-sending the whole 74k-char
+prompt"*). But the session's *response* to the block surfaced two failure modes nothing above covered:
+
+- **The escape hatch.** Blocked, it generated an `apply.py` and told the user to
+  `export COMMOTION_UAT_TOKEN=… && python apply.py --write` — against a base URL it admitted it had
+  **guessed** (*"I guessed `/api` since the MCP hides the base URL"*). That is the same bypass as
+  reaching for `curl`, with an extra step and three specific harms: the bearer token leaves the MCP
+  server for the user's shell history and environment (OAuth-in-the-MCP exists precisely so it never
+  does), the call vanishes from the MCP audit log (`user / method / path / status` per
+  `commotion_request`), and a script built on a guessed base URL is a defect handed to someone else to
+  run against a shared environment. The **staging** half was exactly right — patched file, original
+  kept for revert, byte-identity check after write — and the reference now says so; only the last step
+  changes: the write goes through `commotion_request` on approval, or it doesn't happen.
+- **A `404` from an invented path, reported as a finding.** Asked which knowledge base a UAT tool
+  pointed at, it tried **`/customtool`** and **`/aiagent/{id}/tools`** — neither exists — concluded
+  *"tool wiring isn't exposed"*, and then answered the tcuat question with **dev3** data. Both reads
+  are available and already documented here: `GET /ai-worker-tool?aiWorkerId=&version=` and
+  `GET /aiworker/knowledge?aiWorkerId=`. Note the shape of the error: both guesses were *agent*-scoped,
+  but tools and knowledge hang off the **worker** — an agent is wired to them only by the
+  `[tool:…]` / `[knowledge:…|id:…]` token in its prompt.
+
+`api-and-auth.md` gains two sections — **"Never conclude 'the API doesn't expose that' from a path you
+guessed"** (check the endpoint map, then the live spec, then state *what you checked*) and **"Never use
+one environment's data as evidence about another"** (a dev3 number is not a weaker answer to a tcuat
+question; say the read is unavailable and let the user decide, and if you already substituted, lead
+with that rather than trailing it). The inline block in all five skills grows from two rules to three
+to carry both. Also corrected there: `version` on `AiAgentRequest` is **not** optimistic locking on the
+agent record — it is draft-version pinning to the parent worker, so the risk is writing to the wrong
+version, not losing a race.
+
 ## 2026-08-16 — 2.0.2 — Call Analyzer is now per-user RBAC (token-based), not blanket-admin
 
 The Call Analyzer plane moved from a server-side global api key (blanket admin, cross-workspace) to

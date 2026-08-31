@@ -108,6 +108,28 @@ Analyzer plane. Both go through the connected **Commotion MCP** server:
   **returned, not thrown** — read it and adjust). Pass a **path**; the base URL is fixed server-side.
 - **`commotion_schema`** — a bundled request schema: `{ "schema_name": "RunScenariosRequest" }`.
   **Never invent a field that isn't in the schema.**
+
+**Three rules, all absolute:**
+
+- **Never discover a shape by writing.** `commotion_schema` (plus `GET`s) is how you learn a body.
+  A `POST`/`PUT` carrying placeholder text to "see what sticks" is not a probe — `PUT` is a **full
+  replace**, so it overwrites the real record with your placeholder. If you must try a write shape,
+  create a throwaway `ZZ-TEST-…` worker, probe there, and delete it.
+- **A client-side denial is not an API error.** *"Permission for this action was denied"* /
+  *"Blocked by classifier"* / a permission prompt comes from the **client**, not the backend. Never
+  retry it, never switch connectors, never re-route it through `Bash`/`curl`, and **never hand the user
+  a script plus a token to run the call themselves** — that leaks the credential the MCP exists to hold,
+  skips the audit log, and is built on a base URL you had to guess. Staging the *content* in a file is
+  fine; the write still goes through `commotion_request` on approval. Re-read your body (the denial is
+  usually right), then tell the user plainly what was blocked and move on to the unblocked work.
+- **Never claim "the API doesn't expose that" from a path you guessed, and never answer a question
+  about one environment with another environment's data.** Tools and knowledge hang off the **worker**
+  (`GET /ai-worker-tool?aiWorkerId=&version=`, `GET /aiworker/knowledge?aiWorkerId=`), never off the
+  agent. Check the endpoint map and the live spec, then state what you checked. If a read is
+  unavailable in the selected environment, say it is unavailable — don't substitute dev3 for tcuat.
+
+*(Full detail: `references/api-and-auth.md` in **commotion-create-worker**.)*
+
 - **`commotion_analyzer`** — one **GET** against Call Analyzer: `{ "path": "/api/call/<id>?fields=…" }`
   → `{ "status", "body" }`, plus `"truncated": true` and `"dropped": {<key>: <n>}` when the response was
   too large. It is read-only by construction — there is no `method` argument, so nothing here can
@@ -348,6 +370,12 @@ the full body, which renders in the UI and keeps the agent id so your repro scen
 tools → `POST /ai-worker-tool/…` then `[tool:<action>]` in the prompt;
 knowledge → attach + index, bind with `[knowledge:<name>|id:<id>]`; guardrails/fallback/voice →
 **full** `PUT /aiworker/{id}` resending every field you want to keep, plus `version`).
+
+> ⚠ **If the agent's `instructions` exceed ~8 000 characters**, "the smallest change" is not
+> achievable by retyping the prompt — `PUT` replaces the whole field. Follow `commotion-create-worker`'s
+> `references/large-prompts.md` (`GET` → `Write` to a file → surgical `Edit` → `PUT` → read back and
+> verify). Getting this wrong in a debug loop is especially costly: an unnoticed truncation changes
+> behaviour far beyond the defect, and your verification run will "fail" for a reason you created.
 
 **Show the edit before you make it**, as a before/after with what it addresses. One surface per round,
 so the pass-rate change is attributable.

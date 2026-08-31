@@ -11,7 +11,7 @@ description: >-
   "worker". Handles the worker lifecycle (draft↔live versions, single vs multi-agent, enabling the
   agent, the voice/language schema). Calls the Commotion backend through the thin Commotion MCP server
   (OAuth — no API key in the transcript).
-allowed-tools: Read, AskUserQuestion, Bash, Skill, mcp__commotion-dev3__commotion_request, mcp__commotion-tcuat__commotion_request, mcp__commotion-tcprod__commotion_request, mcp__commotion-dev3__commotion_schema, mcp__commotion-tcuat__commotion_schema, mcp__commotion-tcprod__commotion_schema, mcp__commotion-dev3__commotion_analyzer, mcp__commotion-tcuat__commotion_analyzer, mcp__commotion-tcprod__commotion_analyzer
+allowed-tools: Read, Write, Edit, AskUserQuestion, Bash, Skill, mcp__commotion-dev3__commotion_request, mcp__commotion-tcuat__commotion_request, mcp__commotion-tcprod__commotion_request, mcp__commotion-dev3__commotion_schema, mcp__commotion-tcuat__commotion_schema, mcp__commotion-tcprod__commotion_schema, mcp__commotion-dev3__commotion_analyzer, mcp__commotion-tcuat__commotion_analyzer, mcp__commotion-tcprod__commotion_analyzer
 ---
 
 # Commotion: Create a Worker
@@ -80,6 +80,28 @@ All platform I/O goes through the connected **Commotion MCP** server — two too
   Schema with its `$defs`. Any component name in the live spec works. **Never invent a field that
   isn't in the schema.**
 
+**Three rules, all absolute:**
+
+- **Never discover a shape by writing.** `commotion_schema` (plus `GET`s) is how you learn a body.
+  A `POST`/`PUT` carrying placeholder text to "see what sticks" is not a probe — `PUT` is a **full
+  replace**, so it overwrites the real record with your placeholder. If you must try a write shape,
+  create a throwaway `ZZ-TEST-…` worker, probe there, and delete it.
+- **A client-side denial is not an API error.** *"Permission for this action was denied"* /
+  *"Blocked by classifier"* / a permission prompt comes from the **client**, not the backend. Never
+  retry it, never switch connectors, never re-route it through `Bash`/`curl`, and **never hand the user
+  a script plus a token to run the call themselves** — that leaks the credential the MCP exists to hold,
+  skips the audit log, and is built on a base URL you had to guess. Staging the *content* in a file is
+  fine; the write still goes through `commotion_request` on approval. Re-read your body (the denial is
+  usually right), then tell the user plainly what was blocked and move on to the unblocked work.
+- **Never claim "the API doesn't expose that" from a path you guessed, and never answer a question
+  about one environment with another environment's data.** Tools and knowledge hang off the **worker**
+  (`GET /ai-worker-tool?aiWorkerId=&version=`, `GET /aiworker/knowledge?aiWorkerId=`), never off the
+  agent. Check the endpoint map and the live spec, then state what you checked. If a read is
+  unavailable in the selected environment, say it is unavailable — don't substitute dev3 for tcuat.
+
+*(Full detail: `references/api-and-auth.md`.)*
+
+
 **Auth is automatic (browser login).** The Commotion MCP handles auth via OAuth: on first use it
 opens a Commotion login in the browser, then attaches the user's token to **every**
 `commotion_request` / `commotion_schema` call for you — the raw token never enters the conversation.
@@ -127,7 +149,8 @@ fallback models, and structured output, see `references/control-and-reliability.
 pronunciation dictionaries and state variables (Phase 8.5) — see
 `references/settings-variables-pronunciation.md` (their request schemas are `AiPronunciationDictRequest`
 and `AiWorkerVariableSchemaRequest`); for skills — instruction blocks the agent loads on demand
-(Phase 8.6) — see `references/skills-and-progressive-disclosure.md` (`AiWorkerSkillRequest`).
+(Phase 8.6) — see `references/skills-and-progressive-disclosure.md` (`AiWorkerSkillRequest`); and for
+any agent prompt over ~8 000 characters, see `references/large-prompts.md` **before you write it**.
 
 If the goal implies the worker must **act** (do something, not just answer), also ground in the tool
 surface: `commotion_request` `GET /ai-worker-tool/metadata` (the built-in action catalog) and
@@ -329,6 +352,13 @@ editor *and* over an existing prompt. So write prompts with `PUT` and keep the a
 stable id is what stops scenarios (and anything else pinned to `aiAgentId`) from silently breaking.
 List what's there first: `GET /aiagent?workerId=<worker-id>&version=0`.
 
+> ⚠ **Large prompt? Read `references/large-prompts.md` before you write it.** `instructions` over
+> ~8 000 characters must not be typed straight into the `PUT` body: the backend takes 128 k
+> characters without truncating (measured), so any loss is *yours*, and `PUT` is a full replace so an
+> edit re-emits the whole field. The protocol is file-as-source-of-truth → numbered `## Snn` section
+> anchors → `PUT` → **read it back and verify** before deploying. Above ~20 k, offer decomposition
+> into Worker Skills first. **Never paraphrase a prompt the user gave you.**
+
 - **`SINGLE_AGENT`** — `PUT` the auto-provisioned default; no delete, no re-POST:
   1. `commotion_request` `{ "method": "GET", "path": "/aiagent?workerId=<worker-id>&version=0" }` →
      the default agent id is `body[0].id` (grab its `modelConfigurationResponseList[0]` too).
@@ -451,8 +481,12 @@ The full per-kind recipes, body shapes, HITL, and the projection model are in
   **connector**: `GET /ai-worker-tool/integration-apps` → `GET /ai-worker-tool/app-actions` /
   `GET /ai-worker-tool/webhooks` → `POST /ai-worker-tool/credential` (OAuth) →
   `POST /ai-worker-tool/connector` (see the connector recipe in the reference); another Commotion
-  agent (A2A) → discover its card with `GET /.well-known/agent.json/{workerId}` and call it with
-  `POST /a2a/{workerId}` (A2A is a separate resource, not an `ai-worker-tool` — see the reference's A2A note).
+  agent (**A2A**) → `POST /ai-worker-tool/a2a-agent` with the target's `<base>/a2a/{workerId}` endpoint,
+  then bind the returned `a2aAgentName` as `[tool:<a2aAgentName>]`. ⚠ **A2A has a server half you cannot
+  set from here** — the called worker must be "enabled as A2A server" and no API field does it, not even
+  deploying. Always probe `POST /a2a/{target}` afterwards and, if it answers
+  `"Worker is not enabled as A2A server"`, tell the user plainly that this switch is a manual UI step
+  rather than reporting the setup as done. Full recipe + the verification gate: the reference's A2A section.
 - **Worker vs agent (verified live).** A tool is *created* on the worker (`aiWorkerId` + `version`) —
   that's its only structural home; there is no agent↔tool field on the API. An **agent only calls a
   tool its prompt references**: embed a mention token in `instructions` — `[tool:<action name>]`

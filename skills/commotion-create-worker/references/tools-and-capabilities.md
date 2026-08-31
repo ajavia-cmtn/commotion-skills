@@ -30,13 +30,14 @@ are) and `knowledge-and-rag.md` (what they know).
 | GET | `/ai-worker-tool/integration-apps?identifiers=&pageNumber=&pageSize=` | available SaaS apps |
 | GET | `/ai-worker-tool/app-actions?aiWorkerId=&version=&appIdentifier=&searchText=&…` | an app's actions |
 | GET | `/ai-worker-tool/webhooks?appIdentifier=&searchText=&…` | an app's webhooks |
+| POST / PUT | `/ai-worker-tool/a2a-agent[/{id}]` | attach another agent as an A2A tool |
 | GET | `/.well-known/agent.json/{workerId}` · POST `/a2a/{workerId}` | A2A card / send |
 | POST | `/aiworker/continue` | resume a run paused on a `REQUIRE_APPROVAL` action |
 
 Body shapes: `commotion_schema` `{ "schema_name": "<Name>" }` — `CreateCustomToolRequest`,
 `CreateBuiltInActionsToolRequest`, `CreateCodeBlockToolRequest`, `RunCodeBlockRequest`,
 `CreateMcpServerRequest`/`UpdateMcpServerRequest`, `CreateConnectorToolRequest`/`UpdateConnectorToolRequest`,
-`CreateCredentialRequest`.
+`CreateA2aAgentToolRequest`/`UpdateA2aAgentToolRequest`, `CreateCredentialRequest`.
 
 ## The golden rules (verified against the dev3 spec)
 
@@ -351,26 +352,75 @@ Two capabilities aren't tools — you don't attach them, you turn them on (or th
 
 ## A2A — calling another agent
 
-A2A (agent-to-agent) lets one agent use another Commotion agent. **It is a separate protocol, not an
-`ai-worker-tool` kind** (verified against the spec): a worker exposes itself at `POST /a2a/{workerId}`
-and advertises a card at `GET /.well-known/agent.json/{workerId}`. The calls:
+A2A (agent-to-agent) lets one worker's agent call **another Commotion worker** as a tool. An A2A setup
+has **two sides**, and they are not symmetric — one is fully API-driven, the other is not:
+
+| Side | What it needs | Can you do it through this skill? |
+|------|---------------|-----------------------------------|
+| **Client** (the worker that *calls*) | an `A2A_AGENT` tool pointing at the server worker's `/a2a/{id}` endpoint, then the tool token in an agent prompt | **Yes** — `POST /ai-worker-tool/a2a-agent` |
+| **Server** (the worker being *called*) | "enabled as A2A server" | **No** — no field, no endpoint. UI/internal only. |
+
+**Do the client side, then stop and tell the user the server side is a manual step.** Attaching the
+tool and saying nothing produces a setup that looks complete in the UI and fails at runtime — that is
+the exact defect QA reported (2026-08-31).
+
+### Client side — attach the A2A tool (verified live, dev3, 2026-08-31)
 
 ```
-GET  /.well-known/agent.json/<other worker id>    # 200: a real A2A agent card (skills, capabilities)
-POST /a2a/<other worker id>
-     { jsonrpc:"2.0", id:"1", method:"message/send",
-       params:{ message:{ role:"user", parts:[{ kind:"text", text:"…" }], messageId:"m1" } } }
+POST /ai-worker-tool/a2a-agent
+{ "aiWorkerId": "<client worker id>", "version": <draft version>,
+  "a2aAgentMetaData": {
+    "agentName": "fx_desk",                                    # required
+    "agentDescription": "FX rate desk agent. Ask it for rates.", # required — this is what the LLM reads
+    "agentEndpointUrl": "<base>/a2a/<server worker id>",        # required
+    "agentTags": ["fx"],
+    "credentialId": "<stored A2A credential id>"                # OPTIONAL — omit when the endpoint needs no outbound auth
+  } }
+→ 200 { id, version, aiWorkerId, a2aAgentMetaDataOutput: { a2aAgentName: "fx-desk-1299", … } }
 ```
 
-**Verified live (two gaps):**
-1. **No attach-as-tool.** There is **no `ai-worker-tool` path** to bind a remote agent into a worker's
-   toolset — the tool record has an `a2aAgentMetaDataOutput` slot, but no public endpoint populates it.
-   These calls only *discover* and *invoke* an agent over A2A.
-2. **The target must be A2A-enabled.** The card fetch returns a card for any worker, but
-   `POST /a2a/{id}` to a worker that isn't enabled as an A2A server comes back (HTTP 200) with the
-   JSON-RPC error `"Worker is not enabled as A2A server"`. There is **no A2A-enable field on
-   `AiWorkerRequest`** — that toggle lives outside the documented API (UI), so enabling it isn't
-   possible from the skill yet.
+- **`credentialId` is genuinely optional** — a create with **no** credential returns `200` and a
+  working tool record (verified). This is *unlike* connectors, which silently register empty without one.
+- **Bind it like any other tool**: the backend returns a slugged `a2aAgentName` (`fx-desk-1299`) — put
+  **`[tool:fx-desk-1299]`** in the calling agent's `instructions` and `PUT /aiagent/{id}` (full body).
+  Round-tripped intact. Use the returned `a2aAgentName`, **not** the `agentName` you sent.
+- `PUT /ai-worker-tool/a2a-agent/{aiWorkerToolId}` updates it. **The update replaces the whole
+  metadata block** — restate `credentialId` or you drop the connection.
+- Schemas: `CreateA2aAgentToolRequest` / `UpdateA2aAgentToolRequest` / `A2AAgentMetaDataInput`.
+  `A2AAgentMetaDataInput` also carries `mcpAuthType` (`BASIC_AUTH|BEARER_AUTH|CUSTOM_HEADERS_AUTH`)
+  with `basicAuth` / `bearerToken` / `customHeadersAuths` for an endpoint that authenticates inline.
+
+### Server side — the gap you must surface (verified live 2026-08-31)
+
+`POST /a2a/{workerId}` on a worker that has not been enabled as an A2A server returns **HTTP 200**
+with the JSON-RPC error `"Worker is not enabled as A2A server"`.
+
+**Deploying is not the toggle.** A freshly created worker was given an enabled agent and
+`POST /aiworker/{id}/deploy` → `LIVE`, and `POST /a2a/{id}` *still* returned
+`"Worker is not enabled as A2A server"`. The card at `GET /.well-known/agent.json/{id}` returns `200`
+either way, so **the card is not proof the server works** — it is served for any worker, enabled or not.
+
+There is no `a2aServerEnabled` (or equivalent) anywhere in the spec: not on `AiWorkerRequest`, not on
+`AiAgentRequest`, not on `AiAgentTriggerInput` (whose `aiAgentTriggerType` enum is only
+`CHANNELS|WEBHOOKS|EVENTS` and `aiAgentChannelType` only `VOICE|CHAT`), and there is no
+`/aiworker/**` path for it. A/B against a worker that *is* enabled showed the two records differ in
+**nothing** the API exposes. The flag lives outside the public API.
+
+### The verification gate — never declare an A2A setup done without it
+
+After attaching the client tool, **probe the server**:
+
+```
+POST /a2a/<server worker id>
+     { "jsonrpc":"2.0", "id":"1", "method":"message/send",
+       "params": { "message": { "role":"user",
+                                "parts":[{"kind":"text","text":"ping"}], "messageId":"m1" } } }
+```
+
+- `result.artifacts[…].parts[…].text` → the server side is live; the setup works end to end.
+- `error.message == "Worker is not enabled as A2A server"` → **say so explicitly**, name the server
+  worker, and tell the user this one switch must be flipped in the Commotion UI (or by a platform
+  admin) because the API does not expose it. Do not report the setup as complete.
 
 ## Where this sits in the create-worker flow
 
@@ -396,8 +446,12 @@ A real run that attached a custom tool + a built-in action and created an "Order
   known-good `/mcp`. Decisive: a direct `POST /mcp initialize` to that same URL returns **200 with a
   valid MCP result** (proven from outside), yet create still 500s — so reachability, auth, protocol,
   trailing-slash, and input are all ruled out. **Definitively a dev3 backend bug in `mcp-server` create.**
-- **A2A** — card fetch 200; `POST /a2a/{id}` → `"Worker is not enabled as A2A server"`. No enable
-  field/path exists in the spec and no attach-as-tool endpoint → can't be made via the API at all (UI/internal).
+- **A2A** *(superseded — re-probed 2026-08-31, see the A2A section above)* — the **client** half is
+  now fully API-driven: `POST /ai-worker-tool/a2a-agent` → `200` with a slugged `a2aAgentName`, no
+  credential required, and `[tool:<a2aAgentName>]` round-trips into the calling agent's prompt. The
+  earlier "no attach-as-tool endpoint" note is **wrong** and has been corrected. The **server** half
+  is still closed: `POST /a2a/{id}` → `"Worker is not enabled as A2A server"` even after the worker is
+  deployed `LIVE`, and no enable field/path exists in the spec.
 - **Connector** — `integration-apps` → 50 apps; `app-actions` (clockify) → `create_client` …;
   `POST /ai-worker-tool/connector` with that action and **no credential** → 200
   (`hitlMode:REQUIRE_APPROVAL` round-tripped). `POST /ai-worker-tool/credential` with a dummy Clockify

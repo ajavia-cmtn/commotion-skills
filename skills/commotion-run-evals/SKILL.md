@@ -152,6 +152,28 @@ is the **same transport as `commotion-create-worker`**:
 - **`commotion_schema`** — a bundled request schema: `{ "schema_name": "RunScenariosRequest" }` → the
   JSON Schema with its `$defs`. Any component name in the live spec works. **Never invent a field that
   isn't in the schema.**
+
+**Three rules, all absolute:**
+
+- **Never discover a shape by writing.** `commotion_schema` (plus `GET`s) is how you learn a body.
+  A `POST`/`PUT` carrying placeholder text to "see what sticks" is not a probe — `PUT` is a **full
+  replace**, so it overwrites the real record with your placeholder. If you must try a write shape,
+  create a throwaway `ZZ-TEST-…` worker, probe there, and delete it.
+- **A client-side denial is not an API error.** *"Permission for this action was denied"* /
+  *"Blocked by classifier"* / a permission prompt comes from the **client**, not the backend. Never
+  retry it, never switch connectors, never re-route it through `Bash`/`curl`, and **never hand the user
+  a script plus a token to run the call themselves** — that leaks the credential the MCP exists to hold,
+  skips the audit log, and is built on a base URL you had to guess. Staging the *content* in a file is
+  fine; the write still goes through `commotion_request` on approval. Re-read your body (the denial is
+  usually right), then tell the user plainly what was blocked and move on to the unblocked work.
+- **Never claim "the API doesn't expose that" from a path you guessed, and never answer a question
+  about one environment with another environment's data.** Tools and knowledge hang off the **worker**
+  (`GET /ai-worker-tool?aiWorkerId=&version=`, `GET /aiworker/knowledge?aiWorkerId=`), never off the
+  agent. Check the endpoint map and the live spec, then state what you checked. If a read is
+  unavailable in the selected environment, say it is unavailable — don't substitute dev3 for tcuat.
+
+*(Full detail: `references/api-and-auth.md` in **commotion-create-worker**.)*
+
 - **`commotion_analyzer`** — one **GET** against the **Call Analyzer** plane: `{ "path": "/api/…" }` →
   the same `{ "status", "body" }` shape. This is where the *actual calls* live. **A simulation is just a
   real call with a robot caller**, so every scenario-run has a full transcript, per-turn latency, tool

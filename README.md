@@ -91,6 +91,7 @@ skills/
       control-and-reliability.md      # guardrails, fallback models, structured output
       settings-variables-pronunciation.md  # Settings: pronunciation dictionaries + state variables
       skills-and-progressive-disclosure.md # skills: instruction blocks the agent loads on demand
+      large-prompts.md                # 8k+ prompts: file-as-source-of-truth, section anchors, read-back gate
   commotion-generate-scenarios/
     SKILL.md                          # build a test set: personalities + scenarios for a worker/version
     references/
@@ -192,6 +193,66 @@ to it, and will never silently retry a failed call against a different environme
 
 **Not yet live:** the redesigned BE OAuth provider has not shipped to tcuat or tcprod, so
 authenticating those two connectors will not complete yet. `commotion-dev3` works today.
+
+## Permissions — when a call is blocked before it runs
+
+Reported by QA on 2026-08-31:
+
+```
+Permission for this action was denied by the Claude Code auto mode classifier.
+Reason: Blocked by classifier.
+```
+
+That message comes from **Claude Code, not Commotion**. The backend never saw the call. In auto mode
+the client judges each tool call before running it, and `commotion_request` is a *generic HTTP proxy*
+— `method` + `path` + arbitrary `body` — so a `PUT` carrying an unfamiliar payload is exactly the
+shape it holds back. Two things cause it, and they need different responses.
+
+**1. The call really was destructive.** Check the body before anything else. The blocked example was:
+
+```
+PUT /aiagent/6a7b…   {"name":"TCPL Field Saathi Two Way", …,
+                      "instructions":"SHAPE PROBE - do not deploy"}
+```
+
+`PUT /aiagent/{id}` is a **full replace**. Had that run, a real worker's prompt would have been
+replaced by the string `SHAPE PROBE - do not deploy`. The classifier was right, and the bug is
+upstream: the skills now forbid discovering a body shape by writing — that is what `commotion_schema`
+is for — and forbid sending placeholder text into any real field. If you see this message, read the
+payload Claude was about to send before assuming the client is being over-cautious.
+
+**2. The call was legitimate and you want fewer interruptions.** Add explicit permission rules; they
+take precedence over the classifier. In `.claude/settings.json` (project) or `~/.claude/settings.json`
+(personal):
+
+```jsonc
+{
+  "permissions": {
+    "allow": [
+      // read-only — safe to allow outright
+      "mcp__commotion-dev3__commotion_schema",
+      "mcp__commotion-dev3__commotion_analyzer",
+      // writes too — only if you accept unattended writes to this environment
+      "mcp__commotion-dev3__commotion_request"
+    ]
+  }
+}
+```
+
+Guidance we'd give the team:
+
+- **Always allow the read-only tools** (`commotion_schema`, `commotion_analyzer`) for every
+  environment you use. They cannot change anything, and they are the bulk of the traffic.
+- **Allow `commotion_request` on `dev3` if you like.** It is a scratch environment.
+- **Do not allow `commotion_request` on `commotion-tcprod`.** That is production, `PUT` is a full
+  replace, and a per-call confirmation is worth the friction. Leave production writes prompting.
+- Rules are per connector, so `mcp__commotion-dev3__commotion_request` does not loosen `tcuat` or
+  `tcprod`.
+
+**What Claude must not do about it.** A client-side denial is not an API error. The skills are
+explicit that Claude may not retry it, may not try another environment's connector, and may not
+re-route the same call through `Bash`/`curl` — it must say what was blocked and carry on with the work
+that doesn't depend on it. (`commotion-create-worker/references/api-and-auth.md`.)
 
 ## Relationship to `commotion-mcp`
 

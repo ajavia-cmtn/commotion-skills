@@ -58,6 +58,112 @@ comes back with the backend body (sometimes XML, e.g. `<LinkedHashMap>…`, not 
 failures are a known gotcha (missing `version` on a PUT, an action re-added, a live-only retrieve on
 a draft, …). Only a transport failure (backend unreachable) comes back as a tool error.
 
+## Never discover a shape by writing (this is what gets you blocked)
+
+**`commotion_schema` is the only way to find out what a body looks like. Never send a write to find out.**
+
+A "probe" write — a `POST`/`PUT` carrying placeholder text (`"SHAPE PROBE - do not deploy"`, `"test"`,
+`"x"`) to see which fields the backend accepts — is not a read. On this API it is a **destructive
+overwrite**, because `PUT /aiagent/{id}` and `PUT /aiworker/{id}` are **full replaces**: the probe
+body *becomes* the record. A probe against a real worker silently blanks its prompt, its model config
+and its guardrails. QA hit exactly this on 2026-08-31 (`PUT /aiagent/6a7b…` on "TCPL Field Saathi Two
+Way" with `"instructions": "SHAPE PROBE - do not deploy"`), and the client's permission layer stopped
+it — correctly.
+
+So, in order:
+
+1. **Shape** → `commotion_schema { "schema_name": "AiAgentRequest" }`. Any component in the live spec
+   works. Never invent a field that isn't in it.
+2. **Values / defaults** → `GET /aiworker/metadata`, `GET /aimodel?pageSize=200`,
+   `GET /ai-worker-tool/metadata`. All reads.
+3. **What a real record looks like** → `GET` an existing one and read its fields. A read is free and
+   tells you more than a failed write.
+4. **Still unsure after all three?** Say so and ask the user. Do not resolve it with a write.
+
+If you genuinely need to try a write shape, **create a throwaway worker** (`POST /aiworker`, name it
+`ZZ-TEST-…`), probe on *that*, and `DELETE /aiworker/{id}` when done. Never on a record you did not
+create in this task.
+
+**Corollary — never send filler into a real field.** Every value in a write body must be the value
+you actually intend to persist. `"TBD"`, `"do not deploy"`, `"placeholder"` and empty strings are all
+data as far as the backend is concerned.
+
+## When a call is refused by the client, not by the backend
+
+There are two different kinds of "no", and they need opposite responses:
+
+| Signal | Who said no | What it means |
+|--------|-------------|---------------|
+| `commotion_request` returns `{ "status": 4xx/5xx, … }` | the **backend** | a real API error — read the body, check the reference's gotchas, adjust |
+| the tool call never runs — *"Permission for this action was denied"*, *"Blocked by classifier"*, a permission prompt | the **client** (Claude Code / desktop app) | the call was judged too risky to run unattended |
+
+A client-side denial is **not** an API error and never a reason to retry — not with the same body, not
+on another connector, and above all **not by reaching for `Bash`/`curl` to make the same call another
+way**. That is working around the user's own safety setting.
+
+**This includes handing the user a script.** Generating an `apply.py` / `curl` snippet and telling them
+to `export COMMOTION_<ENV>_TOKEN=… && python apply.py --write` is the same bypass with an extra step,
+and it is worse in three specific ways: the bearer token leaves the MCP server and lands in the user's
+shell history and environment (the whole point of OAuth-in-the-MCP is that it never does); the call
+stops appearing in the MCP's audit log, which records `user / method / path / status` for every
+`commotion_request`; and **you do not know the base URL** — it is fixed server-side and deliberately not
+exposed to you, so any URL in that script is a guess. A script built on a guessed base URL is not a
+fallback, it is a defect you handed to someone else to run against a shared environment.
+
+Staging the *content* is fine and often right — write the patched prompt to a file, show the diff, keep
+the original for revert. Just stop at the boundary: the **write** goes through `commotion_request` once
+the user approves it, or it does not happen.
+
+Do this instead:
+
+1. **Re-read your own body first.** In practice the denial is usually right: a full-replace `PUT`
+   carrying placeholder text, a write to a worker you did not create, or a write against a
+   **production** connector. Fix the call.
+2. If the call is legitimate, **stop and tell the user in one plain sentence**: what you were about
+   to do, which tool was blocked, and that they can approve it or allow it in settings. Then continue
+   with everything that does not depend on it.
+3. Recurring denials on legitimate writes are a **setup** problem, not something to out-argue — point
+   the user at the permissions section in the repo README. One `permissions.allow` rule fixes it for
+   good; a bespoke script fixes it once, unsafely.
+
+## Never conclude "the API doesn't expose that" from a path you guessed
+
+A wrong `404` is more dangerous than a wrong write, because it looks like a finding. The failure mode,
+seen in the wild on 2026-08-31: a session wanted to know which knowledge base a UAT worker's tool
+pointed at, tried **`/customtool`** and **`/aiagent/{id}/tools`** — *neither of which exists* — and
+concluded "tool wiring isn't exposed", then verified the claim against a **different environment's**
+data instead. Both reads it wanted are fully available:
+
+| Question | Real path |
+|---|---|
+| what tools does this worker have, and how are they configured? | `GET /ai-worker-tool?aiWorkerId=<id>&version=<n>` |
+| what knowledge is attached to this worker? | `GET /aiworker/knowledge?aiWorkerId=<id>` |
+
+Note the shape of the mistake: both guesses were **agent**-scoped. Tools and knowledge hang off the
+**worker** (`aiWorkerId` + `version`) — there is no agent↔tool or agent↔knowledge field on the API at
+all. An agent is wired to a tool by the `[tool:…]` / `[knowledge:…|id:…]` token in its `instructions`,
+so "which KB does this agent use?" is answered by reading the **prompt** plus the worker's knowledge
+list, not by a tools sub-resource that does not exist.
+
+So, before writing "the API doesn't support X":
+
+1. Check the endpoint map in this file and the domain reference for that surface.
+2. Check the live spec — `commotion_schema` resolves any component name in it.
+3. Only then say it, and say **what you checked**: "no path under `/aiworker/**` and no field on
+   `AiWorkerRequest`" is a finding; "I tried two paths I made up and got 404" is not.
+
+## Never use one environment's data as evidence about another
+
+Related, and equally load-bearing: if the task is about **tcuat**, a number measured on **dev3** is not
+a weaker version of the answer — it is a different answer to a different question. They are separate
+backends holding unrelated data.
+
+When you cannot read what you need in the selected environment, the honest move is to say the check is
+**unavailable there** and let the user decide. Do not substitute another environment and caveat it; a
+caveat under a confident-looking number gets skimmed, and the number gets quoted. If you have already
+done it, lead with the substitution rather than trailing it: *"I could not read this on tcuat; the
+figure below is dev3 and may not transfer."*
+
 ## Untrusted-id safety
 
 Any id you interpolate into a path must be a safe segment (`^[A-Za-z0-9_-]+$`). Ids returned by the
